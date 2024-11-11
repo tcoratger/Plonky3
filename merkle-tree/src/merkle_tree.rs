@@ -39,12 +39,12 @@ impl<F: Clone + Send + Sync, W: Clone, M: Matrix<F>, const DIGEST_ELEMS: usize>
     where
         P: PackedValue<Value = F>,
         PW: PackedValue<Value = W>,
-        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>,
-        H: CryptographicHasher<P, [PW; DIGEST_ELEMS]>,
-        H: Sync,
-        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>,
-        C: PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>,
-        C: Sync,
+        H: CryptographicHasher<F, [W; DIGEST_ELEMS]>
+            + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+            + Sync,
+        C: PseudoCompressionFunction<[W; DIGEST_ELEMS], 2>
+            + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+            + Sync,
     {
         assert!(!leaves.is_empty(), "No matrices given?");
 
@@ -69,23 +69,21 @@ impl<F: Clone + Send + Sync, W: Clone, M: Matrix<F>, const DIGEST_ELEMS: usize>
         let max_height = leaves_largest_first.peek().unwrap().height();
         let tallest_matrices = leaves_largest_first
             .peeking_take_while(|m| m.height() == max_height)
-            .collect_vec();
+            .collect();
 
         let mut digest_layers = vec![first_digest_layer::<P, PW, H, M, DIGEST_ELEMS>(
             h,
             tallest_matrices,
         )];
-        loop {
-            let prev_layer = digest_layers.last().unwrap().as_slice();
+        while let Some(prev_layer) = digest_layers.last() {
             if prev_layer.len() == 1 {
                 break;
             }
-            let next_layer_len = (prev_layer.len() / 2).next_power_of_two();
 
-            // The matrices that get injected at this layer.
+            let next_layer_len = (prev_layer.len() / 2).next_power_of_two();
             let matrices_to_inject = leaves_largest_first
                 .peeking_take_while(|m| m.height().next_power_of_two() == next_layer_len)
-                .collect_vec();
+                .collect();
 
             let next_digests = compress_and_inject::<P, PW, H, C, M, DIGEST_ELEMS>(
                 prev_layer,
@@ -120,9 +118,9 @@ fn first_digest_layer<P, PW, H, M, const DIGEST_ELEMS: usize>(
 where
     P: PackedValue,
     PW: PackedValue,
-    H: CryptographicHasher<P::Value, [PW::Value; DIGEST_ELEMS]>,
-    H: CryptographicHasher<P, [PW; DIGEST_ELEMS]>,
-    H: Sync,
+    H: CryptographicHasher<P::Value, [PW::Value; DIGEST_ELEMS]>
+        + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
     M: Matrix<P::Value>,
 {
     let width = PW::WIDTH;
@@ -134,7 +132,7 @@ where
         max_height + max_height % 2
     };
 
-    let default_digest: [PW::Value; DIGEST_ELEMS] = [PW::Value::default(); DIGEST_ELEMS];
+    let default_digest = [PW::Value::default(); DIGEST_ELEMS];
     let mut digests = vec![default_digest; max_height_padded];
 
     digests[0..max_height]
@@ -174,12 +172,12 @@ fn compress_and_inject<P, PW, H, C, M, const DIGEST_ELEMS: usize>(
 where
     P: PackedValue,
     PW: PackedValue,
-    H: CryptographicHasher<P::Value, [PW::Value; DIGEST_ELEMS]>,
-    H: CryptographicHasher<P, [PW; DIGEST_ELEMS]>,
-    H: Sync,
-    C: PseudoCompressionFunction<[PW::Value; DIGEST_ELEMS], 2>,
-    C: PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>,
-    C: Sync,
+    H: CryptographicHasher<P::Value, [PW::Value; DIGEST_ELEMS]>
+        + CryptographicHasher<P, [PW; DIGEST_ELEMS]>
+        + Sync,
+    C: PseudoCompressionFunction<[PW::Value; DIGEST_ELEMS], 2>
+        + PseudoCompressionFunction<[PW; DIGEST_ELEMS], 2>
+        + Sync,
     M: Matrix<P::Value>,
 {
     if matrices_to_inject.is_empty() {
@@ -246,9 +244,9 @@ fn compress<P, C, const DIGEST_ELEMS: usize>(
 ) -> Vec<[P::Value; DIGEST_ELEMS]>
 where
     P: PackedValue,
-    C: PseudoCompressionFunction<[P::Value; DIGEST_ELEMS], 2>,
-    C: PseudoCompressionFunction<[P; DIGEST_ELEMS], 2>,
-    C: Sync,
+    C: PseudoCompressionFunction<[P::Value; DIGEST_ELEMS], 2>
+        + PseudoCompressionFunction<[P; DIGEST_ELEMS], 2>
+        + Sync,
 {
     let width = P::WIDTH;
     // Always return an even number of digests, except when it's the root.
