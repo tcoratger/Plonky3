@@ -1,6 +1,6 @@
 //! Various simple utilities.
 
-#![no_std]
+// #![no_std]
 
 extern crate alloc;
 
@@ -15,7 +15,9 @@ use crate::transpose::transpose_in_place_square;
 
 pub mod array_serialization;
 pub mod linear_map;
+mod matrix_mut;
 pub mod transpose;
+pub mod transpose_new;
 pub mod zip_eq;
 
 /// Computes `ceil(log_2(n))`.

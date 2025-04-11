@@ -456,6 +456,12 @@ impl<T: Copy + Default + Send + Sync> DenseMatrix<T, Vec<T>> {
         assert_eq!(other.height(), self.width());
         transpose::transpose(&self.values, &mut other.values, self.width(), self.height());
     }
+
+    pub fn transpose_in_place(&mut self) {
+        let width = self.width();
+        let height = self.height();
+        p3_util::transpose_new::transpose(&mut self.values, height, width);
+    }
 }
 
 impl<'a, T: Clone + Default + Send + Sync> DenseMatrix<T, &'a [T]> {

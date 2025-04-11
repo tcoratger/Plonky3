@@ -19,12 +19,15 @@ criterion.workspace = true
 p3-baby-bear.workspace = true
 p3-mersenne-31.workspace = true
 
+[features]
+parallel = ["p3-util/parallel"]
+
 [[bench]]
 name = "transpose_benchmark"
 path = "benches/transpose_benchmark.rs"
 harness = false
 
-[[bench]]
-name = "columnwise_dot_product"
-path = "benches/columnwise_dot_product.rs"
-harness = false
+# [[bench]]
+# name = "columnwise_dot_product"
+# path = "benches/columnwise_dot_product.rs"
+# harness = false
