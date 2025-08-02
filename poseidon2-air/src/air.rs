@@ -103,6 +103,9 @@ impl<
     fn width(&self) -> usize {
         num_cols::<WIDTH, SBOX_DEGREE, SBOX_REGISTERS, HALF_FULL_ROUNDS, PARTIAL_ROUNDS>()
     }
+    fn structured(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn eval<

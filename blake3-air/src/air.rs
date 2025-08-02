@@ -228,6 +228,9 @@ impl<F> BaseAir<F> for Blake3Air {
     fn width(&self) -> usize {
         NUM_BLAKE3_COLS
     }
+    fn structured(&self) -> bool {
+        todo!("idk")
+    }
 }
 
 impl<AB: AirBuilder> Air<AB> for Blake3Air {

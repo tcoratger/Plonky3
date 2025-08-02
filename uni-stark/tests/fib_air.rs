@@ -26,6 +26,9 @@ impl<F> BaseAir<F> for FibonacciAir {
     fn width(&self) -> usize {
         NUM_FIBONACCI_COLS
     }
+    fn structured(&self) -> bool {
+        true
+    }
 }
 
 impl<AB: AirBuilderWithPublicValues> Air<AB> for FibonacciAir {

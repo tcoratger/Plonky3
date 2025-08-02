@@ -86,6 +86,9 @@ impl<F> BaseAir<F> for MulAir {
     fn width(&self) -> usize {
         TRACE_WIDTH
     }
+    fn structured(&self) -> bool {
+        false
+    }
 }
 
 impl<AB: AirBuilder> Air<AB> for MulAir {

@@ -172,6 +172,9 @@ mod tests {
         fn width(&self) -> usize {
             self.width
         }
+        fn structured(&self) -> bool {
+            todo!("idk")
+        }
     }
 
     impl Air<SymbolicAirBuilder<BabyBear>> for MockAir {

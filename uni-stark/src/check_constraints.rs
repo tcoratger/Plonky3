@@ -153,6 +153,9 @@ mod tests {
         fn width(&self) -> usize {
             W
         }
+        fn structured(&self) -> bool {
+            todo!("idk")
+        }
     }
 
     impl<F: Field, const W: usize> BaseAirWithPublicValues<F> for RowLogicAir<W> {}

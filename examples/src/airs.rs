@@ -92,6 +92,9 @@ impl<
             Self::Keccak(k_air) => <KeccakAir as BaseAir<F>>::width(k_air),
         }
     }
+    fn structured(&self) -> bool {
+        todo!("idk")
+    }
 }
 
 impl<

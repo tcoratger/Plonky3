@@ -232,6 +232,9 @@ impl<
     fn width(&self) -> usize {
         self.air.width() * VECTOR_LEN
     }
+    fn structured(&self) -> bool {
+        self.air.structured()
+    }
 }
 
 impl<
