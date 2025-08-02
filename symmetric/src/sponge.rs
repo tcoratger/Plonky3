@@ -53,7 +53,7 @@ where
             self.permutation.permute_mut(&mut state);
         }
 
-        state[..OUT].try_into().unwrap()
+        state[state.len() - OUT..].try_into().unwrap()
     }
 }
 
