@@ -10,9 +10,9 @@ pub struct RoundConstants<
     const HALF_FULL_ROUNDS: usize,
     const PARTIAL_ROUNDS: usize,
 > {
-    pub(crate) beginning_full_round_constants: [[F; WIDTH]; HALF_FULL_ROUNDS],
-    pub(crate) partial_round_constants: [F; PARTIAL_ROUNDS],
-    pub(crate) ending_full_round_constants: [[F; WIDTH]; HALF_FULL_ROUNDS],
+    pub beginning_full_round_constants: [[F; WIDTH]; HALF_FULL_ROUNDS],
+    pub partial_round_constants: [F; PARTIAL_ROUNDS],
+    pub ending_full_round_constants: [[F; WIDTH]; HALF_FULL_ROUNDS],
 }
 
 impl<F: Field, const WIDTH: usize, const HALF_FULL_ROUNDS: usize, const PARTIAL_ROUNDS: usize>
