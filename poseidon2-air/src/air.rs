@@ -15,7 +15,7 @@ use crate::constants::RoundConstants;
 use crate::{FullRound, PartialRound, SBox, generate_trace_rows};
 
 /// Assumes the field size is at least 16 bits.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Poseidon2Air<
     F: Field,
     LinearLayers,
