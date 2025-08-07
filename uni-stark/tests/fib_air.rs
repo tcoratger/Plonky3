@@ -26,6 +26,9 @@ impl<F> BaseAir<F> for FibonacciAir {
     fn width(&self) -> usize {
         NUM_FIBONACCI_COLS
     }
+    fn degree(&self) -> usize {
+        todo!("idk")
+    }
     fn structured(&self) -> bool {
         true
     }

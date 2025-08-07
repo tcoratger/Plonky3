@@ -103,6 +103,9 @@ impl<
     fn width(&self) -> usize {
         num_cols::<WIDTH, SBOX_DEGREE, SBOX_REGISTERS, HALF_FULL_ROUNDS, PARTIAL_ROUNDS>()
     }
+    fn degree(&self) -> usize {
+        3
+    }
     fn structured(&self) -> bool {
         false
     }

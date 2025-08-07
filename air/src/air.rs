@@ -9,6 +9,8 @@ pub trait BaseAir<F>: Sync {
     /// The number of columns (a.k.a. registers) in this AIR.
     fn width(&self) -> usize;
 
+    fn degree(&self) -> usize;
+
     /// Does the AIR constraints involve up / down rows? (structured = true)
     /// ...Or only up rows (i.e. ordering does not matter)? (structured = false)
     fn structured(&self) -> bool;

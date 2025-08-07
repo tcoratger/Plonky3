@@ -86,6 +86,9 @@ impl<F> BaseAir<F> for MulAir {
     fn width(&self) -> usize {
         TRACE_WIDTH
     }
+    fn degree(&self) -> usize {
+        todo!("idk")
+    }
     fn structured(&self) -> bool {
         false
     }

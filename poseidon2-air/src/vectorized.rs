@@ -232,6 +232,9 @@ impl<
     fn width(&self) -> usize {
         self.air.width() * VECTOR_LEN
     }
+    fn degree(&self) -> usize {
+        self.air.degree()
+    }
     fn structured(&self) -> bool {
         self.air.structured()
     }

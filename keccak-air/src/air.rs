@@ -33,6 +33,9 @@ impl<F> BaseAir<F> for KeccakAir {
     fn width(&self) -> usize {
         NUM_KECCAK_COLS
     }
+    fn degree(&self) -> usize {
+        todo!("idk")
+    }
     fn structured(&self) -> bool {
         todo!("idk")
     }

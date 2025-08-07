@@ -153,6 +153,9 @@ mod tests {
         fn width(&self) -> usize {
             W
         }
+        fn degree(&self) -> usize {
+            todo!("idk")
+        }
         fn structured(&self) -> bool {
             todo!("idk")
         }
