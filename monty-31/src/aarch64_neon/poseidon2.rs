@@ -69,7 +69,9 @@ where
     fn permute_state(&self, state: &mut [PackedMontyField31Neon<FP>; WIDTH]) {
         self.internal_constants.iter().for_each(|&rc| {
             add_rc_and_sbox_generic(&mut state[0], rc);
-            ILP::generic_internal_linear_layer(state);
+            ILP::generic_internal_linear_layer::<PackedMontyField31Neon<FP>, MontyField31<FP>>(
+                state,
+            );
         })
     }
 }
