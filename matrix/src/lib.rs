@@ -25,6 +25,7 @@ pub mod horizontally_truncated;
 pub mod row_index_mapped;
 pub mod stack;
 pub mod strided;
+pub mod strided_poc;
 pub mod util;
 
 /// A simple struct representing the shape of a matrix.

@@ -36,5 +36,10 @@ name = "columnwise_dot_product"
 path = "benches/columnwise_dot_product.rs"
 harness = false
 
+[[bench]]
+name = "columnwise_comparison"
+path = "benches/columnwise_comparison.rs"
+harness = false
+
 [lints]
 workspace = true
