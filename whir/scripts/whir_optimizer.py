@@ -1271,6 +1271,11 @@ def plot_results(configs: list, frontier: list, args):
     print(f"\nPlot saved to {outfile}")
 
     # Zoomed plot: prover vs size in the practical region.
+    #
+    # Unlike the three-panel overview (which uses the 3D Pareto frontier),
+    # this plot shows the **2D Pareto frontier** over prover time and proof
+    # size only. This avoids confusing spikes that appear when a 3D frontier
+    # point has excellent verifier cost but poor prover×size tradeoff.
     fig2, ax2 = plt.subplots(1, 1, figsize=(12, 8))
     fig2.suptitle(
         f"WHIR d={args.num_variables}  {args.security}-bit {args.soundness}  "
@@ -1296,14 +1301,28 @@ def plot_results(configs: list, frontier: list, args):
 
     ax2.scatter(zp, zs, c=zc, alpha=0.5, s=20, edgecolors="none")
 
-    # Overlay the Pareto frontier (clipped to the zoomed region).
-    zfp = [
+    # Compute the 2D Pareto frontier (prover time vs proof size only).
+    # A point is non-dominated in 2D if no other point is both faster
+    # AND smaller. This produces a clean monotonically decreasing staircase.
+    pts_2d = [
         (c.est_prover_ms, c.est_proof_size_bytes / 1024, c)
-        for _, _, _, c in frontier
-        if c.est_prover_ms <= max(zp, default=1) * 1.1
-        and c.est_proof_size_bytes / 1024 <= max(zs, default=1) * 1.1
+        for c in configs
     ]
-    zfp.sort()
+    pts_2d.sort(key=lambda x: x[0])
+    frontier_2d = []
+    best_size = float("inf")
+    for p, s, c in pts_2d:
+        if s < best_size:
+            frontier_2d.append((p, s, c))
+            best_size = s
+
+    # Clip to the zoomed region.
+    zfp = [
+        (p, s, c)
+        for p, s, c in frontier_2d
+        if p <= max(zp, default=1) * 1.1
+        and s <= max(zs, default=1) * 1.1
+    ]
     if zfp:
         ax2.plot(
             [x[0] for x in zfp],
