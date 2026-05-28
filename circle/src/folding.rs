@@ -1,9 +1,6 @@
 use alloc::vec::Vec;
-use core::fmt::Debug;
-use core::marker::PhantomData;
 
 use itertools::Itertools;
-use p3_commit::Mmcs;
 use p3_field::extension::ComplexExtendable;
 use p3_field::{ExtensionField, batch_multiplicative_inverse};
 use p3_fri::FriFoldingStrategy;
@@ -11,26 +8,18 @@ use p3_matrix::Matrix;
 use p3_util::{log2_strict_usize, reverse_bits_len};
 
 use crate::domain::CircleDomain;
-use crate::{CircleInputProof, InputError};
 
-pub(crate) struct CircleFriFolding<F, InputProof, InputError>(
-    pub(crate) PhantomData<(F, InputProof, InputError)>,
-);
+pub(crate) struct CircleFriFolding;
 
-pub(crate) type CircleFriFoldingForMmcs<Val, Challenge, InputMmcs, FriMmcs> = CircleFriFolding<
-    Val,
-    CircleInputProof<Val, Challenge, InputMmcs, FriMmcs>,
-    InputError<<InputMmcs as Mmcs<Val>>::Error, <FriMmcs as Mmcs<Challenge>>::Error>,
->;
-
-impl<F: ComplexExtendable, EF: ExtensionField<F>, InputProof, InputError: Debug>
-    FriFoldingStrategy<F, EF> for CircleFriFolding<F, InputProof, InputError>
-{
-    type InputProof = InputProof;
-    type InputError = InputError;
-
-    fn extra_query_index_bits(&self) -> usize {
+impl CircleFriFolding {
+    pub(crate) const fn extra_query_index_bits() -> usize {
         1
+    }
+}
+
+impl<F: ComplexExtendable, EF: ExtensionField<F>> FriFoldingStrategy<F, EF> for CircleFriFolding {
+    fn extra_query_index_bits(&self) -> usize {
+        Self::extra_query_index_bits()
     }
 
     fn fold_row(

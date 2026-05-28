@@ -4,15 +4,31 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::CanObserve;
+use p3_field::{PrimeCharacteristicRing, PrimeField32, PrimeField64};
+use p3_symmetric::{CryptographicHasher, CryptographicPermutation};
+
 use crate::fs::pattern::InteractionPattern;
+use crate::fs::shake128::Shake128;
 use crate::fs::unit::Unit;
+use crate::{
+    CanObserve, DuplexChallenger, HashChallenger, MultiField32Challenger, SerializingChallenger32,
+    SerializingChallenger64,
+};
 
 /// Protocol-identifier length from IETF draft §3, in bytes.
 pub const PROTOCOL_ID_LEN: usize = 64;
 
 /// Terminator that closes the seeding stream so no seed is a prefix of another.
 const DOMAIN_TAG: u8 = 0x80;
+
+/// Absorb bytes into a challenger.
+///
+/// This is intentionally separate from transcript codecs: these bytes are not proof material and
+/// do not correspond to a pattern step.
+pub trait CanObserveBytes {
+    /// Absorb seed bytes into the challenger.
+    fn observe_bytes(&mut self, bytes: &[u8]);
+}
 
 /// Per-instance binding for a transcript.
 ///
@@ -89,20 +105,82 @@ impl<U: Unit> DomainSeparator<U> {
         &self.pattern
     }
 
-    /// Absorb the seed into a byte-shaped sponge.
+    /// Absorb the seed into a challenger.
     ///
     /// Wire layout: `[protocol_id | len_be_4_bytes | label | DOMAIN_TAG]`.
     pub fn seed_bytes<C>(&self, challenger: &mut C)
     where
-        C: CanObserve<u8>,
+        C: CanObserveBytes,
     {
-        challenger.observe_slice(&self.protocol_id);
+        challenger.observe_bytes(&self.protocol_id);
         // Length prefix prevents two labels of different lengths from colliding.
         let len = self.instance_label.len() as u32;
-        challenger.observe_slice(&len.to_be_bytes());
-        challenger.observe_slice(&self.instance_label);
+        challenger.observe_bytes(&len.to_be_bytes());
+        challenger.observe_bytes(&self.instance_label);
         // Terminator stops later absorbs from extending the seed.
-        challenger.observe(DOMAIN_TAG);
+        challenger.observe_bytes(&[DOMAIN_TAG]);
+    }
+}
+
+impl CanObserveBytes for Shake128 {
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        self.observe_slice(bytes);
+    }
+}
+
+impl<H, const OUT_LEN: usize> CanObserveBytes for HashChallenger<u8, H, OUT_LEN>
+where
+    H: CryptographicHasher<u8, [u8; OUT_LEN]>,
+{
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        self.observe_slice(bytes);
+    }
+}
+
+impl<F, P, const WIDTH: usize, const RATE: usize> CanObserveBytes
+    for DuplexChallenger<F, P, WIDTH, RATE>
+where
+    F: Copy + PrimeCharacteristicRing,
+    P: CryptographicPermutation<[F; WIDTH]>,
+{
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.observe(F::from_u8(*byte));
+        }
+    }
+}
+
+impl<F, PF, P, const WIDTH: usize, const RATE: usize> CanObserveBytes
+    for MultiField32Challenger<F, PF, P, WIDTH, RATE>
+where
+    F: PrimeField32,
+    PF: p3_field::PrimeField,
+    P: CryptographicPermutation<[PF; WIDTH]>,
+{
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.observe(F::from_u8(*byte));
+        }
+    }
+}
+
+impl<F, Inner> CanObserveBytes for SerializingChallenger32<F, Inner>
+where
+    F: PrimeField32,
+    Inner: CanObserve<u8>,
+{
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        self.inner.observe_slice(bytes);
+    }
+}
+
+impl<F, Inner> CanObserveBytes for SerializingChallenger64<F, Inner>
+where
+    F: PrimeField64,
+    Inner: CanObserve<u8>,
+{
+    fn observe_bytes(&mut self, bytes: &[u8]) {
+        self.inner.observe_slice(bytes);
     }
 }
 
@@ -124,6 +202,12 @@ mod tests {
     impl CanObserve<u8> for ByteRecorder {
         fn observe(&mut self, value: u8) {
             self.buf.push(value);
+        }
+    }
+
+    impl CanObserveBytes for ByteRecorder {
+        fn observe_bytes(&mut self, seed: &[u8]) {
+            self.buf.extend_from_slice(seed);
         }
     }
 

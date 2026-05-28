@@ -3,10 +3,11 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt::{Display, Formatter};
 
-use p3_field::{BasedVectorSpace, Field, PrimeField64};
+use p3_field::{BasedVectorSpace, Field, PrimeField, PrimeField64};
 use p3_monty_31::{MontyField31, MontyParameters};
 use p3_symmetric::{CryptographicPermutation, Hash, MerkleCap};
 
+use crate::fs::{DefaultCodec, FieldToFieldCodec};
 use crate::{
     CanFinalizeDigest, CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, FieldChallenger,
 };
@@ -105,6 +106,15 @@ where
     F: PrimeField64,
     P: CryptographicPermutation<[F; WIDTH]>,
 {
+}
+
+impl<F, P, const WIDTH: usize, const RATE: usize> DefaultCodec<F>
+    for DuplexChallenger<F, P, WIDTH, RATE>
+where
+    F: PrimeField + BasedVectorSpace<F> + Copy,
+    P: CryptographicPermutation<[F; WIDTH]>,
+{
+    type Codec = FieldToFieldCodec<F>;
 }
 
 impl<F, P, const WIDTH: usize, const RATE: usize> CanObserve<F>

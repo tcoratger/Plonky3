@@ -1,14 +1,17 @@
 //! Codec for extension-field elements over a base-field codec.
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use p3_field::{BasedVectorSpace, Field};
 
 use crate::fs::codecs::Codec;
+use crate::fs::error::TranscriptError;
 
 /// Lifts a base-field codec to an extension-field codec, coefficient by coefficient.
 ///
 /// The wire format follows the basis order returned by the field crate.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ExtensionFieldCodec<F, EF, BaseCodec>(PhantomData<(F, EF, BaseCodec)>);
 
 impl<C, F, EF, BaseCodec> Codec<C, EF> for ExtensionFieldCodec<F, EF, BaseCodec>
@@ -29,6 +32,30 @@ where
     fn sample(challenger: &mut C) -> EF {
         // Sample one coefficient per basis index in the matching order.
         EF::from_basis_coefficients_fn(|_| BaseCodec::sample(challenger))
+    }
+
+    fn byte_len() -> usize {
+        EF::DIMENSION * BaseCodec::byte_len()
+    }
+
+    fn encode(value: &EF) -> Vec<u8> {
+        value
+            .as_basis_coefficients_slice()
+            .iter()
+            .flat_map(BaseCodec::encode)
+            .collect()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<EF, TranscriptError> {
+        let coeff_len = BaseCodec::byte_len();
+        let coeffs = bytes
+            .chunks_exact(coeff_len)
+            .take(EF::DIMENSION)
+            .map(BaseCodec::decode)
+            .collect::<Result<Vec<_>, _>>()?;
+        EF::from_basis_coefficients_iter(coeffs.into_iter()).ok_or(TranscriptError::BadProofShape {
+            reason: "extension element basis size mismatch",
+        })
     }
 }
 

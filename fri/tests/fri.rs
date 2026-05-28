@@ -1,16 +1,22 @@
 use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
-use p3_challenger::{CanObserve, CanSampleBits, DuplexChallenger, FieldChallenger};
-use p3_commit::{ExtensionMmcs, Pcs};
+use p3_challenger::DuplexChallenger;
+use p3_challenger::fs::{
+    DomainSeparator, FieldToFieldCodec, InteractionPattern, ProverState, VerifierState,
+};
+use p3_commit::{ExtensionMmcs, MmcsReader, MmcsWriter, Pcs};
 use p3_dft::Radix2Dit;
-use p3_field::coset::TwoAdicMultiplicativeCoset;
+use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{Field, PrimeCharacteristicRing};
+use p3_fri::protocol::{
+    BatchSpec, FriLabels, FriLabelsDefault as Labels, FriProtocol, MatrixSpec, Protocol as _,
+};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
+use p3_matrix::Dimensions;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 
 type Val = BabyBear;
 type Challenge = BinomialExtensionField<Val, 4>;
@@ -23,26 +29,78 @@ type ValMmcs =
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
 type MyPcs = TwoAdicFriPcs<BabyBear, Radix2Dit<BabyBear>, ValMmcs, ChallengeMmcs>;
+type Domain = <MyPcs as Pcs<Challenge, Challenger>>::Domain;
 
-/// Returns a permutation and a FRI-pcs instance.
-fn get_ldt_for_testing<R: Rng>(rng: &mut R, log_final_poly_len: usize) -> (Perm, MyPcs) {
-    let perm = Perm::new_from_rng_128(rng);
+const WIDTDH: usize = 16;
+
+fn domain_separator(
+    protocol: &FriProtocol,
+    params: &FriParameters<ChallengeMmcs>,
+    input_mmcs: &ValMmcs,
+) -> DomainSeparator<u8> {
+    let mut interactions = Vec::new();
+    protocol.append_pcs_interactions::<Val, Challenge, ValMmcs, ChallengeMmcs>(
+        &mut interactions,
+        input_mmcs,
+        params,
+    );
+    protocol.append_fri_pattern::<Val, Challenge, ValMmcs, ChallengeMmcs>(
+        &mut interactions,
+        params,
+        input_mmcs,
+    );
+    let mut ds: DomainSeparator<u8> = DomainSeparator::new(
+        1,
+        b"fri-test",
+        InteractionPattern::new(interactions).unwrap(),
+    );
+    ds.bind_pattern_hash();
+    ds
+}
+
+fn perm() -> Perm {
+    const PERM_SEED: u64 = 100;
+    let mut rng = SmallRng::seed_from_u64(PERM_SEED);
+    Perm::new_from_rng_128(&mut rng)
+}
+
+fn challenger() -> Challenger {
+    let perm = perm();
+    Challenger::new(perm)
+}
+
+fn input_mmcs() -> ValMmcs {
+    let perm = perm();
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
-    let input_mmcs = ValMmcs::new(hash.clone(), compress.clone(), 0);
-    let fri_mmcs = ChallengeMmcs::new(ValMmcs::new(hash, compress, 0));
-    let fri_params = FriParameters {
-        log_blowup: 1,
-        log_final_poly_len,
-        max_log_arity: 1,
-        num_queries: 10,
-        commit_proof_of_work_bits: 0,
-        query_proof_of_work_bits: 8,
-        mmcs: fri_mmcs,
-    };
-    let dft = Radix2Dit::default();
-    let pcs = MyPcs::new(dft, input_mmcs, fri_params);
-    (perm, pcs)
+    ValMmcs::new(hash.clone(), compress.clone(), 0)
+}
+
+fn fri_mmcs() -> ChallengeMmcs {
+    let perm = perm();
+    let hash = MyHash::new(perm.clone());
+    let compress = MyCompress::new(perm.clone());
+    ChallengeMmcs::new(ValMmcs::new(hash.clone(), compress.clone(), 0))
+}
+
+fn rand_matrix<R: RngExt>(
+    rng: &mut R,
+    spec: &BatchSpec,
+    pcs: &MyPcs,
+) -> Vec<(Domain, RowMajorMatrix<Val>)> {
+    spec.matrices()
+        .iter()
+        .map(|matrix_spec| {
+            let dimensions = matrix_spec.dimensions();
+            (
+                <MyPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(
+                    pcs,
+                    dimensions.height,
+                ),
+                RowMajorMatrix::<Val>::rand_nonzero(rng, dimensions.height, dimensions.width),
+            )
+        })
+        .collect::<Vec<_>>()
 }
 
 /// Check that the loop of `pcs.commit`, `pcs.open`, and `pcs.verify` work correctly.
@@ -53,110 +111,166 @@ fn get_ldt_for_testing<R: Rng>(rng: &mut R, log_final_poly_len: usize) -> (Perm,
 /// We open each polynomial at the same point `zeta` and run FRI to verify the openings, stopping
 /// FRI at `log_final_poly_len`.
 fn do_test_fri_ldt<R: Rng>(rng: &mut R, log_final_poly_len: usize, polynomial_log_sizes: &[u8]) {
-    let (perm, pcs) = get_ldt_for_testing(rng, log_final_poly_len);
+    let input_mmcs = input_mmcs();
+    let fri_mmcs = fri_mmcs();
+    let params = FriParameters {
+        mmcs: fri_mmcs,
+        log_blowup: 1,
+        log_final_poly_len,
+        max_log_arity: 1,
+        num_queries: 10,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: 8,
+    };
 
-    // Convert the polynomial_log_sizes into field elements so they can be observed.
-    let val_sizes: Vec<Val> = polynomial_log_sizes
+    let matrices = polynomial_log_sizes
         .iter()
-        .map(|&i| Val::from_u8(i))
-        .collect();
+        .map(|&log_size| {
+            MatrixSpec::new(
+                Dimensions {
+                    height: 1 << log_size,
+                    width: WIDTDH,
+                },
+                1,
+            )
+        })
+        .collect::<Vec<_>>();
+    let protocol = FriProtocol::new(&params, vec![BatchSpec::new(matrices)], 0);
+    let pcs = MyPcs::new(Radix2Dit::default(), input_mmcs, params);
+    let ds = domain_separator(&protocol, pcs.params(), pcs.input_mmcs());
 
     // --- Prover World ---
-    let (commitment, opened_values, opening_proof, mut p_challenger) = {
-        // Initialize the challenger and observe the `polynomial_log_sizes`.
-        let mut challenger = Challenger::new(perm.clone());
-        challenger.observe_slice(&val_sizes);
+    let proof = {
+        let mut transcript = ProverState::<_, u8>::new(challenger(), &ds);
+        let matrices = protocol
+            .batches
+            .iter()
+            .map(|batch| rand_matrix(rng, batch, &pcs))
+            .collect::<Vec<_>>();
+        let (commitments, data) = matrices
+            .into_iter()
+            .map(|mat| <MyPcs as Pcs<Challenge, Challenger>>::commit(&pcs, mat))
+            .unzip::<_, _, Vec<_>, Vec<_>>();
+        let mut opening_points = Vec::with_capacity(protocol.batches.len());
+        for (batch_index, (commitment, batch)) in
+            commitments.into_iter().zip(&protocol.batches).enumerate()
+        {
+            pcs.input_mmcs().write_commitment(
+                &mut transcript,
+                Labels::commitment(batch_index),
+                commitment,
+            );
 
-        // Generate random evaluation matrices for each polynomial degree.
-        let evaluations: Vec<(TwoAdicMultiplicativeCoset<Val>, RowMajorMatrix<Val>)> =
-            polynomial_log_sizes
+            let batch_opening_points = batch
+                .matrices()
                 .iter()
-                .map(|deg_bits| {
-                    let deg = 1 << deg_bits;
-                    (
-                        // Get the TwoAdicSubgroup of this degree.
-                        <MyPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(&pcs, deg),
-                        // Generate a random matrix of evaluations.
-                        RowMajorMatrix::<Val>::rand_nonzero(rng, deg, 16),
-                    )
+                .enumerate()
+                .map(|(matrix_index, matrix)| {
+                    (0..matrix.num_opening_points())
+                        .map(|point_index| {
+                            transcript
+                                .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                                    Labels::opening_point(batch_index, matrix_index, point_index),
+                                )
+                                .into_inner()
+                        })
+                        .collect::<Vec<_>>()
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            opening_points.push(batch_opening_points);
+        }
 
-        let num_evaluations = evaluations.len();
+        pcs.open(
+            data.iter().zip(opening_points).collect::<Vec<_>>(),
+            &mut transcript,
+        );
 
-        // Commit to all the evaluation matrices.
-        let (commitment, prover_data) =
-            <TwoAdicFriPcs<BabyBear, Radix2Dit<BabyBear>, ValMmcs, ChallengeMmcs> as Pcs<
-                Challenge,
-                Challenger,
-            >>::commit(&pcs, evaluations);
-
-        challenger.observe(&commitment);
-
-        // Sample the challenge point zeta which all polynomials
-        // will be opened at.
-        let zeta: Challenge = challenger.sample_algebra_element();
-
-        // Prepare the data into the form expected by `pcs.open`.
-        let open_data = vec![(&prover_data, vec![vec![zeta]; num_evaluations])]; // open every chunk at zeta
-
-        // Open all polynomials at zeta and produce the opening proof.
-        let (opened_values, opening_proof) = pcs.open(open_data, &mut challenger);
-
-        // Return the commitment, opened values, opening proof and challenger.
-        // The first three of these are always passed to the verifier. The
-        // last is to double check that the prover and verifiers challengers
-        // agree at appropriate points.
-        (commitment, opened_values, opening_proof, challenger)
+        transcript.finalize()
     };
 
     // --- Verifier World ---
-    let mut v_challenger = {
-        // Initialize the verifier's challenger with the same permutation.
-        // Observe the `polynomial_log_sizes` and `commitment` in the same order
-        // as the prover.
-        let mut challenger = Challenger::new(perm);
-        challenger.observe_slice(&val_sizes);
-        challenger.observe(&commitment);
+    {
+        let mut transcript = VerifierState::<_, u8>::new(challenger(), &ds, &proof);
+        let mut commitments = Vec::with_capacity(protocol.batches.len());
+        let mut opening_points = Vec::with_capacity(protocol.batches.len());
+        for (batch_index, batch) in protocol.batches.iter().enumerate() {
+            let commitment = pcs
+                .input_mmcs()
+                .read_commitment(
+                    &mut transcript,
+                    Labels::commitment(batch_index),
+                    &protocol.input_batch_dimensions[batch_index],
+                )
+                .unwrap()
+                .into_inner();
+            commitments.push(commitment);
 
-        // Sample the opening point.
-        let zeta = challenger.sample_algebra_element();
+            let batch_opening_points = batch
+                .matrices()
+                .iter()
+                .enumerate()
+                .map(|(matrix_index, matrix)| {
+                    (0..matrix.num_opening_points())
+                        .map(|point_index| {
+                            transcript
+                                .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                                    Labels::opening_point(batch_index, matrix_index, point_index),
+                                )
+                                .into_inner()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            opening_points.push(batch_opening_points);
+        }
 
-        // Construct the expected initial polynomial domains.
-        // Right now it doesn't matter what these are so long as the size
-        // is correct.
-        let domains = polynomial_log_sizes.iter().map(|&size| {
-            <MyPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(&pcs, 1 << size)
-        });
+        let commitments_with_opening_points = protocol
+            .batches
+            .iter()
+            .zip(commitments)
+            .enumerate()
+            .map(|(batch_index, (batch, commitment))| {
+                let batch_opening_points = batch
+                    .matrices()
+                    .iter()
+                    .enumerate()
+                    .map(|(matrix_index, matrix)| {
+                        let domain =
+                            <MyPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(
+                                &pcs,
+                                matrix.height(),
+                            );
+                        let points_and_values = opening_points[batch_index][matrix_index]
+                            .iter()
+                            .enumerate()
+                            .map(|(point_index, &point)| {
+                                let values = transcript
+                                    .next_extensions::<Val, Challenge, FieldToFieldCodec<Val>>(
+                                        Labels::opened_values(
+                                            batch_index,
+                                            matrix_index,
+                                            point_index,
+                                        ),
+                                        matrix.width(),
+                                    )
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|value| value.into_inner())
+                                    .collect::<Vec<_>>();
+                                (point, values)
+                            })
+                            .collect::<Vec<_>>();
+                        (domain, points_and_values)
+                    })
+                    .collect::<Vec<_>>();
+                (commitment, batch_opening_points)
+            })
+            .collect::<Vec<_>>();
 
-        // Prepare the data into the form expected by `pcs.verify`.
-        // Note that commitment and opened_values are always sent by
-        // the prover.
-        let commitments_with_opening_points = vec![(
-            commitment,
-            domains
-                .into_iter()
-                .zip(opened_values.into_iter().flatten().flatten())
-                .map(|(domain, value)| (domain, vec![(zeta, value)]))
-                .collect(),
-        )];
-
-        // Verify the opening proof.
-        let verification = pcs.verify(
-            commitments_with_opening_points,
-            &opening_proof,
-            &mut challenger,
-        );
-        assert!(verification.is_ok());
-        challenger
-    };
-
-    // Check that the prover and verifier challengers agree.
-    assert_eq!(
-        p_challenger.sample_bits(8),
-        v_challenger.sample_bits(8),
-        "prover and verifier transcript have same state after FRI"
-    );
+        pcs.verify(commitments_with_opening_points, &mut transcript)
+            .unwrap();
+        transcript.finalize().unwrap();
+    }
 }
 
 /// Test that the FRI commit, open and verify process work correctly

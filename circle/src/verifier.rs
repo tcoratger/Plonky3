@@ -1,149 +1,131 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use itertools::Itertools;
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{BatchOpeningRef, Mmcs};
-use p3_field::{ExtensionField, Field};
+use p3_challenger::fs::{DefaultCodec, ExtensionFieldCodec, FieldToFieldCodec, VerifierState};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_commit::{BatchDimensions, BatchOpeningRef, Mmcs, MmcsReader};
+use p3_field::{ExtensionField, PrimeField};
 use p3_fri::verifier::FriError;
 use p3_fri::{FriFoldingStrategy, FriParameters};
 use p3_matrix::Dimensions;
 
-use crate::{CircleCommitPhaseProofStep, CircleFriProof};
+use crate::proof::CircleCommitPhaseProofStep;
+use crate::protocol::{CircleLabelsDefault, CircleProtocol, FriLabels};
 
-pub fn verify<Folding, Val, Challenge, M, Challenger>(
+pub fn verify<'a, Folding, Val, Challenge, M, Challenger, InputError>(
     folding: &Folding,
     params: &FriParameters<M>,
-    proof: &CircleFriProof<Challenge, M, Challenger::Witness, Folding::InputProof>,
-    challenger: &mut Challenger,
-    open_input: impl Fn(
+    protocol: &CircleProtocol,
+    transcript: &mut VerifierState<'a, Challenger>,
+    mut open_input: impl FnMut(
         usize,
-        &Folding::InputProof,
-    ) -> Result<Vec<(usize, Challenge)>, Folding::InputError>,
-) -> Result<(), FriError<M::Error, Folding::InputError>>
+        usize,
+        &mut VerifierState<'a, Challenger>,
+    ) -> Result<Vec<(usize, Challenge)>, FriError<M::Error, InputError>>,
+) -> Result<(), FriError<M::Error, InputError>>
 where
-    Val: Field,
+    Val: PrimeField,
     Challenge: ExtensionField<Val>,
-    M: Mmcs<Challenge>,
-    Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<M::Commitment>,
+    M: MmcsReader<Challenge>,
+    Challenger: FieldChallenger<Val> + GrindingChallenger<Witness = Val> + DefaultCodec<M::Digest>,
     Folding: FriFoldingStrategy<Val, Challenge>,
+    InputError: core::fmt::Debug,
 {
+    let fri_mmcs = &params.mmcs;
+    transcript.begin_protocol::<()>(CircleLabelsDefault::PROTOCOL);
+
     // Phase 1: Derive folding challenges
     //
     // In Circle-FRI, the verifier must produce one random challenge (beta)
     // per commit-phase round. Each commitment is observed into the Fiat-Shamir
     // transcript, then a challenge is sampled.
     // This yields exactly as many betas as there are commit-phase rounds.
-    let betas: Vec<Challenge> = proof
-        .commit_phase_commits
-        .iter()
-        .map(|comm| {
-            // Absorb this round's commitment into the transcript.
-            challenger.observe(comm.clone());
-            // Squeeze a field-extension element to use as the folding challenge.
-            challenger.sample_algebra_element()
-        })
-        .collect();
+    let mut commitments = Vec::with_capacity(protocol.rounds.dimensions.len());
+    let mut betas = Vec::with_capacity(protocol.rounds.dimensions.len());
+    for (round, dims) in protocol.rounds.dimensions.iter().enumerate() {
+        // Absorb this round's commitment into the transcript.
+        let commitment = fri_mmcs
+            .read_commitment(
+                transcript,
+                CircleLabelsDefault::round_commitment(round),
+                &BatchDimensions::single(*dims),
+            )?
+            .into_inner();
+        // Squeeze a field-extension element to use as the folding challenge.
+        let beta = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::beta(round),
+            )
+            .into_inner();
+        commitments.push(commitment);
+        betas.push(beta);
+    }
 
     // Absorb the prover's claimed constant polynomial into the transcript.
     // After all folding rounds, the result should reduce to this constant.
-    challenger.observe_algebra_element(proof.final_poly);
-
-    // Phase 2: Structural shape checks
-    //
-    // Before doing any expensive cryptographic work, validate that the proof
-    // has the right shape. A malicious prover could submit too few (or too
-    // many) query proofs, mismatched opening counts, or inconsistent arity
-    // schedules. Catching these early avoids wasted work and gives precise
-    // error variants.
-
-    // The number of query proofs must match the security parameter.
-    if proof.query_proofs.len() != params.num_queries {
-        return Err(FriError::QueryProofCountMismatch {
-            expected: params.num_queries,
-            got: proof.query_proofs.len(),
-        });
-    }
+    let final_poly =
+        transcript
+            .next_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::final_poly(),
+            )?
+            .into_inner();
 
     // Verify proof-of-work: a grinding witness that the prover must compute
     // to raise the cost of brute-forcing query positions.
-    if !challenger.check_witness(params.query_proof_of_work_bits, proof.pow_witness) {
-        return Err(FriError::InvalidPowWitness);
-    }
+    transcript.check_pow(
+        CircleLabelsDefault::pow_query(params.query_proof_of_work_bits),
+        params.query_proof_of_work_bits,
+    )?;
 
-    // Each query proof must carry exactly one opening per commit-phase round.
+    // Phase 2: Query verification.
     //
-    //     commit_phase_commits:       [c_0, c_1, ..., c_{n-1}]   (n rounds)
-    //     qp.commit_phase_openings:   [o_0, o_1, ..., o_{n-1}]   (must also be n)
-    //
-    // A mismatch means the prover omitted or duplicated round data.
-    let expected_rounds = proof.commit_phase_commits.len();
-    for (query, qp) in proof.query_proofs.iter().enumerate() {
-        let got_rounds = qp.commit_phase_openings.len();
-        if got_rounds != expected_rounds {
-            return Err(FriError::QueryCommitPhaseOpeningsCountMismatch {
-                query,
-                expected: expected_rounds,
-                got: got_rounds,
-            });
-        }
-    }
+    // The folding chain starts after first bivariate layer. Query sampling
+    // still includes any extra index bits needed by the PCS callback.
+    let log_max_height = protocol.log_max_height;
+    for query in 0..params.num_queries {
+        // Sample a full query index. The PCS callback uses the extra bit to open
+        // the original input and first layer; FRI ignores it by shifting below.
+        let index = transcript
+            .challenge_bits(
+                CircleLabelsDefault::query_index(query),
+                protocol.query_bits(),
+            )
+            .into_inner();
 
-    // In variable-arity FRI, each round folds by 2^{log_arity_i} points.
-    // All query proofs must agree on the per-round arity schedule, otherwise
-    // different queries would fold through incompatible domain decompositions.
-    //
-    // We take the first query proof's schedule as the reference:
-    let log_arities: Vec<usize> = proof
-        .query_proofs
-        .first()
-        .map(|qp| {
-            qp.commit_phase_openings
-                .iter()
-                .map(|o| o.log_arity as usize)
-                .collect()
-        })
-        .unwrap_or_default();
+        // Open the input polynomials at this query index. The callback returns reduced
+        // opening contributions as `(log_height, value)` pairs, sorted by height.
+        let ro = open_input(query, index, transcript)?;
 
-    // Compare every subsequent query proof against the reference schedule.
-    for (query, qp) in proof.query_proofs.iter().enumerate().skip(1) {
-        let got_log_arities: Vec<usize> = qp
-            .commit_phase_openings
+        // Read the FRI round openings for this query. For each round, the transcript
+        // provides all sibling evaluations except the queried value and the MMCS opening
+        // proof for that row.
+        let mut commit_phase_openings = Vec::with_capacity(protocol.rounds.log_arities.len());
+        for (round, (&log_arity, dimensions)) in protocol
+            .rounds
+            .log_arities
             .iter()
-            .map(|o| o.log_arity as usize)
-            .collect();
-        if got_log_arities != log_arities {
-            return Err(FriError::QueryLogAritiesMismatch {
-                query,
-                expected: log_arities,
-                got: got_log_arities,
+            .zip(protocol.rounds.dimensions.iter())
+            .enumerate()
+        {
+            let sibling_values = transcript.next_hints::<Challenge, ExtensionFieldCodec<
+                Val,
+                Challenge,
+                FieldToFieldCodec<Val>,
+            >>(
+                CircleLabelsDefault::sibling_values(query, round),
+                (1 << log_arity) - 1,
+            )?;
+            let opening_proof = fri_mmcs.read_opening_proof(
+                transcript,
+                CircleLabelsDefault::round_opening_proof(query, round),
+                &BatchDimensions::single(*dimensions),
+            )?;
+            commit_phase_openings.push(CircleCommitPhaseProofStep {
+                log_arity: u8::try_from(log_arity).expect("Circle-FRI log arity fits in u8"),
+                sibling_values,
+                opening_proof,
             });
         }
-    }
-
-    // Phase 3: Query verification
-    //
-    // The initial evaluation domain has size 2^{log_max_height}, where
-    // log_max_height = sum(log_arities) + log_blowup.
-    // Each folding round reduces the domain by 2^{log_arity_i}, so after
-    // all rounds the domain shrinks to 2^{log_blowup} (the blowup factor).
-    let total_log_reduction: usize = log_arities.iter().sum();
-    let log_max_height = total_log_reduction + params.log_blowup;
-
-    for qp in &proof.query_proofs {
-        // Sample a random query index uniformly from the initial domain.
-        let index = challenger.sample_bits(log_max_height + folding.extra_query_index_bits());
-
-        // Open the input polynomials at this query index.
-        // Returns (log_height, evaluation) pairs sorted by height descending.
-        let ro = open_input(index, &qp.input_proof).map_err(FriError::InputError)?;
-
-        // Sanity check: reduced openings must arrive in strictly descending
-        // height order so they are folded in at the correct domain sizes.
-        debug_assert!(
-            ro.iter().tuple_windows().all(|((l, _), (r, _))| l > r),
-            "reduced openings sorted by height descending"
-        );
 
         // Zip the challenges, commitments, and openings together for folding.
         //
@@ -153,8 +135,8 @@ where
         // Plain zip is safe; it cannot silently truncate.
         let fold_data_iter = betas
             .iter()
-            .zip(proof.commit_phase_commits.iter())
-            .zip(qp.commit_phase_openings.iter());
+            .zip(commitments.iter())
+            .zip(commit_phase_openings.iter());
 
         // Walk the FRI folding chain: at each round, verify the Merkle
         // opening against the commitment, then fold the sibling evaluations
@@ -162,6 +144,7 @@ where
         let folded_eval = verify_query(
             folding,
             params,
+            fri_mmcs,
             index >> folding.extra_query_index_bits(),
             fold_data_iter,
             ro,
@@ -170,11 +153,12 @@ where
 
         // After all rounds, the polynomial has been folded to a constant.
         // That constant must equal the prover's claimed final polynomial.
-        if folded_eval != proof.final_poly {
+        if folded_eval != final_poly {
             return Err(FriError::FinalPolyMismatch);
         }
     }
 
+    transcript.end_protocol::<()>(CircleLabelsDefault::PROTOCOL);
     Ok(())
 }
 
@@ -214,19 +198,21 @@ type CommitStep<'a, F, M> = (
 ///
 /// The final folded evaluation, which the caller checks against
 /// the prover's claimed constant.
-fn verify_query<'a, Folding, F, EF, M>(
+fn verify_query<'a, Folding, F, EF, M, InputError>(
     folding: &Folding,
     params: &FriParameters<M>,
+    mmcs: &M,
     mut index: usize,
     steps: impl ExactSizeIterator<Item = CommitStep<'a, EF, M>>,
     reduced_openings: Vec<(usize, EF)>,
     log_max_height: usize,
-) -> Result<EF, FriError<M::Error, Folding::InputError>>
+) -> Result<EF, FriError<M::Error, InputError>>
 where
-    F: Field,
+    F: PrimeField,
     EF: ExtensionField<F>,
     M: Mmcs<EF> + 'a,
     Folding: FriFoldingStrategy<F, EF>,
+    InputError: core::fmt::Debug,
 {
     // Running accumulator: starts at zero and accumulates reduced openings
     // and folding results as we walk up the tree.
@@ -301,15 +287,13 @@ where
 
         // Verify the Merkle opening: the sibling evaluations the prover
         // gave us must be consistent with the round commitment.
-        params
-            .mmcs
-            .verify_batch(
-                comm,
-                dims,
-                index,
-                BatchOpeningRef::new(&[evals.clone()], &opening.opening_proof),
-            )
-            .map_err(FriError::CommitPhaseMmcsError)?;
+        mmcs.verify_batch(
+            comm,
+            dims,
+            index,
+            BatchOpeningRef::new(&[evals.clone()], &opening.opening_proof),
+        )
+        .map_err(FriError::CommitPhaseMmcsError)?;
 
         // Fold the full sibling group down to a single evaluation using
         // the random challenge beta. This is the core FRI step.

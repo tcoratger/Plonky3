@@ -2,15 +2,16 @@
 
 use alloc::vec::Vec;
 
-use p3_field::{BasedVectorSpace, PrimeField};
+use p3_field::{BasedVectorSpace, Field, PrimeField};
 
+use crate::fs::ExtensionFieldCodec;
 use crate::fs::bound::TranscriptBound;
 use crate::fs::codecs::Codec;
-use crate::fs::codecs::decode_field::{encode_field_be, field_byte_size};
-use crate::fs::domain_separator::DomainSeparator;
+use crate::fs::codecs::decode_field::field_byte_size;
+use crate::fs::domain_separator::{CanObserveBytes, DomainSeparator};
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
-use crate::{CanObserve, GrindingChallenger};
+use crate::{CanObserve, CanSampleBits, GrindingChallenger};
 
 /// Drives a prover-side transcript in lockstep with a recorded pattern.
 ///
@@ -42,7 +43,7 @@ impl<C, U: Unit> ProverState<C, U> {
     /// Build a driver and seed the challenger from the domain separator.
     pub fn new(mut challenger: C, ds: &DomainSeparator<U>) -> Self
     where
-        C: CanObserve<u8>,
+        C: CanObserveBytes,
     {
         // Seed first so two distinct (protocol, instance) pairs land on distinct sponge states.
         ds.seed_bytes(&mut challenger);
@@ -109,19 +110,7 @@ impl<C, U: Unit> ProverState<C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of type `F`.
-        self.player.interact(Interaction::new::<F>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Absorb through the codec; the codec decides field vs. byte path.
-        Cdc::observe(&mut self.challenger, value);
-        // Append the canonical big-endian encoding to the wire.
-        let bytes = encode_field_be::<F>(value);
-        self.narg.extend_from_slice(&bytes);
-        TranscriptBound::wrap(*value)
+        self.add_message::<F, Cdc>(label, value)
     }
 
     /// Absorb a known-length list of scalars under a single pattern step.
@@ -132,8 +121,38 @@ impl<C, U: Unit> ProverState<C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
+        self.add_messages::<F, Cdc>(label, values)
+    }
+
+    /// Absorb one typed prover message through the supplied codec.
+    pub fn add_message<T, Cdc>(&mut self, label: Label, value: &T) -> TranscriptBound<T>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        // Validate: the next pattern step is a scalar message of type `T`.
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Scalar,
+        ));
+        // Absorb through the codec; the codec decides field vs. byte path.
+        Cdc::observe(&mut self.challenger, value);
+        // Append the codec-selected encoding to the wire.
+        let bytes = Cdc::encode(value);
+        self.narg.extend_from_slice(&bytes);
+        TranscriptBound::wrap(value.clone())
+    }
+
+    /// Absorb a known-length list of typed prover messages under a single pattern step.
+    pub fn add_messages<T, Cdc>(&mut self, label: Label, values: &[T]) -> Vec<TranscriptBound<T>>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
         // Validate: the next pattern step is a fixed-length list of scalars.
-        self.player.interact(Interaction::new::<F>(
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -141,11 +160,11 @@ impl<C, U: Unit> ProverState<C, U> {
         ));
         // Absorb each value, mirror its canonical encoding to the wire, and bind it.
         let mut bound = Vec::with_capacity(values.len());
-        for v in values {
-            Cdc::observe(&mut self.challenger, v);
-            let bytes = encode_field_be::<F>(v);
+        for value in values {
+            Cdc::observe(&mut self.challenger, value);
+            let bytes = Cdc::encode(value);
             self.narg.extend_from_slice(&bytes);
-            bound.push(TranscriptBound::wrap(*v));
+            bound.push(TranscriptBound::wrap(value.clone()));
         }
         bound
     }
@@ -154,37 +173,65 @@ impl<C, U: Unit> ProverState<C, U> {
     pub fn add_extension<F, EF, Cdc>(&mut self, label: Label, value: &EF) -> TranscriptBound<EF>
     where
         F: PrimeField,
-        EF: BasedVectorSpace<F> + Copy,
+        EF: Field + BasedVectorSpace<F>,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of extension type.
-        self.player.interact(Interaction::new::<EF>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Each coefficient travels through the same codec and wire format as a scalar.
-        for coeff in value.as_basis_coefficients_slice() {
-            Cdc::observe(&mut self.challenger, coeff);
-            let bytes = encode_field_be::<F>(coeff);
-            self.narg.extend_from_slice(&bytes);
-        }
-        TranscriptBound::wrap(*value)
+        self.add_message::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, value)
     }
 
-    /// Append a hint to the wire buffer without absorbing it into the sponge.
+    /// Absorb a known-length list of extension-field elements coefficient by coefficient.
     ///
-    /// Hint bytes are part of the wire format but never enter the sponge,
+    /// No length prefix is written; the recorded pattern is the source of truth.
+    pub fn add_extensions<F, EF, Cdc>(
+        &mut self,
+        label: Label,
+        values: &[EF],
+    ) -> Vec<TranscriptBound<EF>>
+    where
+        F: PrimeField,
+        EF: Field + BasedVectorSpace<F>,
+        Cdc: Codec<C, F>,
+    {
+        self.add_messages::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, values)
+    }
+
+    /// Append one typed hint to the wire buffer without absorbing it into the sponge.
+    ///
+    /// Hint values are part of the wire format but never enter the sponge,
     /// so they cannot influence sampled challenges.
-    pub fn add_hint(&mut self, label: Label, bytes: &[u8]) {
-        self.player.interact(Interaction::new::<u8>(
+    pub fn add_hint<T, Cdc>(&mut self, label: Label, value: &T)
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
-            Length::Fixed(bytes.len()),
+            Length::Scalar,
         ));
-        self.narg.extend_from_slice(bytes);
+        let bytes = Cdc::encode(value);
+        self.narg.extend_from_slice(&bytes);
+    }
+
+    /// Append a known-length list of typed hints under a single pattern step.
+    ///
+    /// No hint is absorbed; the recorded pattern is the source of truth for length.
+    pub fn add_hints<T, Cdc>(&mut self, label: Label, values: &[T])
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Hint,
+            label,
+            Length::Fixed(values.len()),
+        ));
+        for value in values {
+            let bytes = Cdc::encode(value);
+            self.narg.extend_from_slice(&bytes);
+        }
     }
 
     /// Sample one challenge scalar of type `F` via codec `Cdc`.
@@ -219,6 +266,20 @@ impl<C, U: Unit> ProverState<C, U> {
             .collect()
     }
 
+    /// Sample one challenge integer with a caller-supplied bit width.
+    pub fn challenge_bits(&mut self, label: Label, bits: usize) -> TranscriptBound<usize>
+    where
+        C: CanSampleBits<usize>,
+    {
+        self.player.interact(Interaction::new::<usize>(
+            Hierarchy::Atomic,
+            Kind::Challenge,
+            label,
+            Length::Bits(bits),
+        ));
+        TranscriptBound::wrap(self.challenger.sample_bits(bits))
+    }
+
     /// Sample one challenge extension-field element coefficient by coefficient.
     pub fn challenge_extension<F, EF, Cdc>(&mut self, label: Label) -> TranscriptBound<EF>
     where
@@ -238,7 +299,7 @@ impl<C, U: Unit> ProverState<C, U> {
     }
 
     /// Run a proof-of-work step and append the witness to the wire buffer.
-    pub fn pow(&mut self, bits: usize)
+    pub fn pow(&mut self, label: Label, bits: usize)
     where
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
@@ -247,7 +308,7 @@ impl<C, U: Unit> ProverState<C, U> {
         self.player.interact(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
-            "pow",
+            label,
             Length::Scalar,
         ));
         // Grind through the challenger's SIMD path.
@@ -290,12 +351,12 @@ mod tests {
     use p3_baby_bear::BabyBear;
     use p3_field::{PrimeCharacteristicRing, PrimeField32};
 
-    use crate::fs::TranscriptBound;
     use crate::fs::codecs::BytesToFieldCodec;
     use crate::fs::domain_separator::DomainSeparator;
     use crate::fs::pattern::{Hierarchy, Interaction, InteractionPattern, Kind, Length};
     use crate::fs::shake128::Shake128;
     use crate::fs::state::{ProverState, VerifierState};
+    use crate::fs::{ByteCodec, TranscriptBound};
 
     /// Concrete field exercised in this module's tests.
     type F = BabyBear;
@@ -436,7 +497,7 @@ mod tests {
         // Helper: run a prover with the given hint bytes and return (bound challenge, wire).
         let drive_with_hint = |hint: &[u8; 4]| -> (TranscriptBound<F>, Vec<u8>) {
             let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
-            p.add_hint("merkle-path", hint);
+            p.add_hints::<u8, ByteCodec>("merkle-path", hint);
             let c = p.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
             (c, p.finalize())
         };
@@ -453,11 +514,11 @@ mod tests {
         // Property 3: verifier reads back the original hint bytes.
         let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg_a);
         let read_hint = v
-            .next_hint("merkle-path", 4)
+            .next_hints::<u8, ByteCodec>("merkle-path", 4)
             .expect("verifier reads hint bytes");
         let _ = v.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
         v.finalize().expect("NARG fully consumed");
-        assert_eq!(read_hint, &[1, 2, 3, 4]);
+        assert_eq!(read_hint, [1, 2, 3, 4]);
     }
 
     #[test]

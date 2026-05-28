@@ -2,18 +2,19 @@
 
 use alloc::vec::Vec;
 
-use p3_field::{BasedVectorSpace, PrimeField};
+use p3_field::{BasedVectorSpace, Field, PrimeField};
 
+use crate::fs::ExtensionFieldCodec;
 use crate::fs::bound::TranscriptBound;
 use crate::fs::codecs::Codec;
 use crate::fs::codecs::decode_field::{
     decode_field_be_canonical, encode_field_be, field_byte_size,
 };
-use crate::fs::domain_separator::DomainSeparator;
+use crate::fs::domain_separator::{CanObserveBytes, DomainSeparator};
 use crate::fs::error::TranscriptError;
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
-use crate::{CanObserve, GrindingChallenger};
+use crate::{CanObserve, CanSampleBits, GrindingChallenger};
 
 /// Drives a verifier-side transcript in lockstep with a recorded pattern.
 ///
@@ -50,7 +51,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
     /// Build a driver and seed the challenger from the domain separator.
     pub fn new(mut challenger: C, ds: &DomainSeparator<U>, narg: &'a [u8]) -> Self
     where
-        C: CanObserve<u8>,
+        C: CanObserveBytes,
     {
         // Seed identically to the prover so both sides land on the same sponge state.
         ds.seed_bytes(&mut challenger);
@@ -144,20 +145,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of type `F`.
-        self.player.interact(Interaction::new::<F>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Read the canonical big-endian encoding from the wire.
-        let need = field_byte_size::<F>();
-        let raw = self.take_bytes(need)?;
-        let value = decode_field_be_canonical::<F>(raw)?;
-        // Absorb through the same codec the prover used so both sides agree.
-        Cdc::observe(&mut self.challenger, &value);
-        Ok(TranscriptBound::wrap(value))
+        self.next_message::<F, Cdc>(label)
     }
 
     /// Replay an `add_scalars` step from the prover.
@@ -170,21 +158,53 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a fixed-length list of `n` scalars.
-        self.player.interact(Interaction::new::<F>(
+        self.next_messages::<F, Cdc>(label, n)
+    }
+
+    /// Replay an `add_message` step from the prover.
+    pub fn next_message<T, Cdc>(
+        &mut self,
+        label: Label,
+    ) -> Result<TranscriptBound<T>, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Scalar,
+        ));
+        let raw = self.take_bytes(Cdc::byte_len())?;
+        let value = Cdc::decode(raw)?;
+        Cdc::observe(&mut self.challenger, &value);
+        Ok(TranscriptBound::wrap(value))
+    }
+
+    /// Replay an `add_messages` step from the prover.
+    pub fn next_messages<T, Cdc>(
+        &mut self,
+        label: Label,
+        n: usize,
+    ) -> Result<Vec<TranscriptBound<T>>, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
             Length::Fixed(n),
         ));
-        // Pull `n` canonical encodings from the wire, decoding, absorbing, and binding each.
-        let need = field_byte_size::<F>();
+        let need = Cdc::byte_len();
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             let raw = self.take_bytes(need)?;
-            let v = decode_field_be_canonical::<F>(raw)?;
-            Cdc::observe(&mut self.challenger, &v);
-            out.push(TranscriptBound::wrap(v));
+            let value = Cdc::decode(raw)?;
+            Cdc::observe(&mut self.challenger, &value);
+            out.push(TranscriptBound::wrap(value));
         }
         Ok(out)
     }
@@ -196,50 +216,62 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
     ) -> Result<TranscriptBound<EF>, TranscriptError>
     where
         F: PrimeField,
-        EF: BasedVectorSpace<F>,
+        EF: Field + BasedVectorSpace<F>,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of extension type `EF`.
-        self.player.interact(Interaction::new::<EF>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Read one base-field coefficient per basis index, decoding and absorbing each.
-        let need = field_byte_size::<F>();
-        let basis_len = EF::DIMENSION;
-        let mut coeffs: Vec<F> = Vec::with_capacity(basis_len);
-        for _ in 0..basis_len {
-            let raw = self.take_bytes(need)?;
-            let v = decode_field_be_canonical::<F>(raw)?;
-            Cdc::observe(&mut self.challenger, &v);
-            coeffs.push(v);
-        }
-        // Reconstruct in the same basis order the prover used.
-        let value = EF::from_basis_coefficients_iter(coeffs.into_iter()).ok_or(
-            TranscriptError::BadProofShape {
-                reason: "extension element basis size mismatch",
-            },
-        )?;
-        Ok(TranscriptBound::wrap(value))
+        self.next_message::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label)
+    }
+
+    /// Replay an `add_extensions` step from the prover.
+    pub fn next_extensions<F, EF, Cdc>(
+        &mut self,
+        label: Label,
+        n: usize,
+    ) -> Result<Vec<TranscriptBound<EF>>, TranscriptError>
+    where
+        F: PrimeField,
+        EF: Field + BasedVectorSpace<F>,
+        Cdc: Codec<C, F>,
+    {
+        self.next_messages::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, n)
     }
 
     /// Replay an `add_hint` step.
     ///
-    /// Hint bytes are returned to the caller; they are never absorbed.
-    pub fn next_hint(
-        &mut self,
-        label: Label,
-        byte_len: usize,
-    ) -> Result<&'a [u8], TranscriptError> {
-        self.player.interact(Interaction::new::<u8>(
+    /// Hint values are returned to the caller; they are never absorbed.
+    pub fn next_hint<T, Cdc>(&mut self, label: Label) -> Result<T, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
-            Length::Fixed(byte_len),
+            Length::Scalar,
         ));
-        self.take_bytes(byte_len)
+        let raw = self.take_bytes(Cdc::byte_len())?;
+        Cdc::decode(raw)
+    }
+
+    /// Replay an `add_hints` step.
+    pub fn next_hints<T, Cdc>(&mut self, label: Label, n: usize) -> Result<Vec<T>, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Hint,
+            label,
+            Length::Fixed(n),
+        ));
+        let need = Cdc::byte_len();
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(Cdc::decode(self.take_bytes(need)?)?);
+        }
+        Ok(out)
     }
 
     /// Sample one challenge scalar in lockstep with the prover.
@@ -274,6 +306,20 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
             .collect()
     }
 
+    /// Sample one challenge integer with a caller-supplied bit width.
+    pub fn challenge_bits(&mut self, label: Label, bits: usize) -> TranscriptBound<usize>
+    where
+        C: CanSampleBits<usize>,
+    {
+        self.player.interact(Interaction::new::<usize>(
+            Hierarchy::Atomic,
+            Kind::Challenge,
+            label,
+            Length::Bits(bits),
+        ));
+        TranscriptBound::wrap(self.challenger.sample_bits(bits))
+    }
+
     /// Sample one challenge extension-field element in lockstep with the prover.
     pub fn challenge_extension<F, EF, Cdc>(&mut self, label: Label) -> TranscriptBound<EF>
     where
@@ -297,7 +343,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
     /// - Reads the witness from the wire,
     /// - Checks its encoding is canonical,
     /// - Absorbs it through the challenger's PoW path.
-    pub fn check_pow(&mut self, bits: usize) -> Result<(), TranscriptError>
+    pub fn check_pow(&mut self, label: Label, bits: usize) -> Result<(), TranscriptError>
     where
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
@@ -306,7 +352,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         self.player.interact(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
-            "pow",
+            label,
             Length::Scalar,
         ));
         // Read the witness from the wire and decode it as a canonical field element.

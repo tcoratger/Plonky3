@@ -5,6 +5,8 @@
 
 pub mod bound;
 pub mod codecs;
+#[cfg(feature = "debug")]
+mod debug;
 pub mod domain_separator;
 pub mod error;
 pub mod pattern;
@@ -14,9 +16,10 @@ pub mod unit;
 
 pub use bound::TranscriptBound;
 pub use codecs::{
-    BytesToFieldCodec, Codec, ExtensionFieldCodec, FieldToBytesCodec, FieldToFieldCodec,
+    ByteCodec, BytesToFieldCodec, Codec, DefaultCodec, ExtensionFieldCodec, FieldToBytesCodec,
+    FieldToFieldCodec,
 };
-pub use domain_separator::{DomainSeparator, PROTOCOL_ID_LEN};
+pub use domain_separator::{CanObserveBytes, DomainSeparator, PROTOCOL_ID_LEN};
 pub use error::{
     InvalidKindInfo, MismatchedBeginEndInfo, MissingBeginInfo, MissingEndInfo, PatternMismatchInfo,
     TranscriptError,

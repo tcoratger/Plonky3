@@ -1,9 +1,16 @@
+use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use itertools::Itertools;
-use p3_commit::{BatchOpening, BatchOpeningRef, Mmcs};
-use p3_field::PackedValue;
+use p3_challenger::fs::{
+    DefaultCodec, Hierarchy, Interaction, Kind, Label, Length, ProverState, TranscriptBound,
+    TranscriptError, VerifierState,
+};
+use p3_commit::{
+    BatchDimensions, BatchOpening, BatchOpeningRef, Mmcs, MmcsReader, MmcsTranscript, MmcsWriter,
+};
+use p3_field::{PackedValue, PrimeField};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::stack::HorizontalPair;
 use p3_matrix::{Dimensions, Matrix};
@@ -162,6 +169,238 @@ where
             BatchOpeningRef::new(&opened_salted_values, siblings),
         )
     }
+}
+
+impl<P, PW, H, C, R, const N: usize, const DIGEST_ELEMS: usize, const SALT_ELEMS: usize>
+    MmcsTranscript<P::Value> for MerkleTreeHidingMmcs<P, PW, H, C, R, N, DIGEST_ELEMS, SALT_ELEMS>
+where
+    P: PackedValue,
+    PW: PackedValue<Value = P::Value>,
+    P::Value: PrimeField,
+    Self: Mmcs<
+            P::Value,
+            Commitment = MerkleCap<P::Value, [P::Value; DIGEST_ELEMS]>,
+            Error = MerkleTreeError,
+            Proof = (Vec<Vec<P::Value>>, Vec<[P::Value; DIGEST_ELEMS]>),
+        >,
+{
+    type Digest = P::Value;
+
+    fn append_commitment(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) {
+        let cap_roots_len = self
+            .inner
+            .commitment_roots_len(dimensions.as_slice())
+            .expect("valid Merkle hiding commitment dimensions");
+        interactions.push(Interaction::new::<P::Value>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Fixed(cap_roots_len * DIGEST_ELEMS),
+        ));
+    }
+
+    fn append_opening_proof_hint(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) {
+        let sibling_len = self
+            .inner
+            .opening_proof_len(dimensions.as_slice())
+            .expect("valid Merkle hiding opening dimensions");
+        let proof_len = dimensions.len() * SALT_ELEMS + sibling_len * DIGEST_ELEMS;
+        interactions.push(Interaction::new::<P::Value>(
+            Hierarchy::Atomic,
+            Kind::Hint,
+            label,
+            Length::Fixed(proof_len),
+        ));
+    }
+}
+
+impl<P, PW, H, C, R, const N: usize, const DIGEST_ELEMS: usize, const SALT_ELEMS: usize>
+    MmcsWriter<P::Value> for MerkleTreeHidingMmcs<P, PW, H, C, R, N, DIGEST_ELEMS, SALT_ELEMS>
+where
+    P: PackedValue,
+    PW: PackedValue<Value = P::Value>,
+    P::Value: PrimeField,
+    Self: Mmcs<
+            P::Value,
+            Commitment = MerkleCap<P::Value, [P::Value; DIGEST_ELEMS]>,
+            Error = MerkleTreeError,
+            Proof = (Vec<Vec<P::Value>>, Vec<[P::Value; DIGEST_ELEMS]>),
+        >,
+{
+    fn write_commitment<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        label: Label,
+        commitment: Self::Commitment,
+    ) where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        let values = commitment
+            .roots()
+            .iter()
+            .flat_map(|digest| digest.iter().cloned())
+            .collect::<Vec<_>>();
+        transcript
+            .add_scalars::<P::Value, <Ch as DefaultCodec<Self::Digest>>::Codec>(label, &values);
+    }
+
+    fn write_proof_hint<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+        opening_proof: Self::Proof,
+    ) where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        let (salts, siblings) = opening_proof;
+        assert_eq!(salts.len(), dimensions.len());
+        assert!(salts.iter().all(|salt| salt.len() == SALT_ELEMS));
+        let sibling_len = self
+            .inner
+            .opening_proof_len(dimensions.as_slice())
+            .expect("prover dimensions produce a valid opening shape");
+        assert_eq!(siblings.len(), sibling_len);
+        let proof_values = salts
+            .iter()
+            .flat_map(|salt| salt.iter().copied())
+            .chain(siblings.iter().flat_map(|digest| digest.iter().copied()))
+            .collect::<Vec<_>>();
+        transcript.add_hints::<P::Value, <Ch as DefaultCodec<Self::Digest>>::Codec>(
+            opening_proof_label,
+            &proof_values,
+        );
+    }
+}
+
+impl<P, PW, H, C, R, const N: usize, const DIGEST_ELEMS: usize, const SALT_ELEMS: usize>
+    MmcsReader<P::Value> for MerkleTreeHidingMmcs<P, PW, H, C, R, N, DIGEST_ELEMS, SALT_ELEMS>
+where
+    P: PackedValue,
+    PW: PackedValue<Value = P::Value>,
+    P::Value: PrimeField,
+    Self: Mmcs<
+            P::Value,
+            Commitment = MerkleCap<P::Value, [P::Value; DIGEST_ELEMS]>,
+            Error = MerkleTreeError,
+            Proof = (Vec<Vec<P::Value>>, Vec<[P::Value; DIGEST_ELEMS]>),
+        >,
+{
+    fn read_commitment<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<TranscriptBound<Self::Commitment>, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        let cap_roots_len = self
+            .inner
+            .commitment_roots_len(dimensions.as_slice())
+            .map_err(|_| TranscriptError::BadProofShape {
+                reason: "invalid hiding Merkle commitment dimensions",
+            })?;
+        let bound_values = transcript
+            .next_scalars::<P::Value, <Ch as DefaultCodec<Self::Digest>>::Codec>(
+                label,
+                cap_roots_len * DIGEST_ELEMS,
+            )?;
+        assert!(
+            DIGEST_ELEMS > 0,
+            "Merkle digest must contain at least one word"
+        );
+        assert!(
+            !bound_values.is_empty() && bound_values.len() % DIGEST_ELEMS == 0,
+            "Merkle cap transcript value count must be a non-empty multiple of DIGEST_ELEMS"
+        );
+        let mut bound_values = bound_values.into_iter();
+        let first = bound_values
+            .next()
+            .expect("cannot bind an empty list of transcript values");
+        Ok(bound_values
+            .fold(first.map(|value| vec![value]), |acc, value| {
+                acc.combine_with(value, |mut acc, value| {
+                    acc.push(value);
+                    acc
+                })
+            })
+            .map(|values| {
+                let roots = values
+                    .chunks_exact(DIGEST_ELEMS)
+                    .map(|chunk| core::array::from_fn(|i| chunk[i].clone()))
+                    .collect();
+                MerkleCap::new(roots)
+            }))
+    }
+
+    fn read_opening_proof<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<Self::Proof, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        let sibling_len = self
+            .inner
+            .opening_proof_len(dimensions.as_slice())
+            .map_err(|_| TranscriptError::BadProofShape {
+                reason: "invalid hiding Merkle opening dimensions",
+            })?;
+        let proof_len = dimensions.len() * SALT_ELEMS + sibling_len * DIGEST_ELEMS;
+        let proof_values = transcript
+            .next_hints::<P::Value, <Ch as DefaultCodec<Self::Digest>>::Codec>(
+                opening_proof_label,
+                proof_len,
+            )?;
+        split_hiding_proof::<P::Value, DIGEST_ELEMS, SALT_ELEMS>(proof_values, dimensions.len())
+    }
+}
+
+fn split_hiding_proof<F: PrimeField, const DIGEST_ELEMS: usize, const SALT_ELEMS: usize>(
+    values: Vec<F>,
+    num_matrices: usize,
+) -> Result<(Vec<Vec<F>>, Vec<[F; DIGEST_ELEMS]>), TranscriptError> {
+    let salt_values_len = num_matrices * SALT_ELEMS;
+    if values.len() < salt_values_len {
+        return Err(TranscriptError::BadProofShape {
+            reason: "hiding Merkle proof is missing salts",
+        });
+    }
+    let (salt_values, sibling_values) = values.split_at(salt_values_len);
+    if sibling_values.len() % DIGEST_ELEMS != 0 {
+        return Err(TranscriptError::BadProofShape {
+            reason: "hiding Merkle sibling proof value length is not digest-aligned",
+        });
+    }
+    let salts = salt_values
+        .chunks_exact(SALT_ELEMS)
+        .map(|salt| salt.to_vec())
+        .collect();
+    let siblings = sibling_values
+        .chunks_exact(DIGEST_ELEMS)
+        .map(|words| {
+            words
+                .to_vec()
+                .try_into()
+                .map_err(|_| TranscriptError::BadProofShape {
+                    reason: "hiding Merkle sibling digest has the wrong number of words",
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((salts, siblings))
 }
 
 #[cfg(test)]

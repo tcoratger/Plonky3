@@ -7,14 +7,17 @@ use p3_field::PrimeField;
 
 use crate::fs::codecs::Codec;
 use crate::fs::codecs::decode_field::{
-    decode_field_via_extra_bytes, field_byte_size, required_bytes,
+    decode_field_be_canonical, decode_field_via_extra_bytes, encode_field_be, field_byte_size,
+    required_bytes,
 };
+use crate::fs::error::TranscriptError;
 use crate::{CanObserve, CanSample};
 
 /// Codec that maps a prime-field scalar to bytes and back via the IETF `Ns + 16` rule.
 ///
 /// Statistical distance from uniform on the field is bounded by `2^-128`
 /// independently of the prime (DSFS Lemma C.1).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BytesToFieldCodec<F>(PhantomData<F>);
 
 impl<C, F> Codec<C, F> for BytesToFieldCodec<F>
@@ -49,6 +52,18 @@ where
             bytes.push(challenger.sample());
         }
         decode_field_via_extra_bytes::<F>(&bytes)
+    }
+
+    fn byte_len() -> usize {
+        field_byte_size::<F>()
+    }
+
+    fn encode(value: &F) -> Vec<u8> {
+        encode_field_be(value)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<F, TranscriptError> {
+        decode_field_be_canonical(bytes)
     }
 }
 

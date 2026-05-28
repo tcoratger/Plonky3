@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 
 use tiny_keccak::{Hasher, Shake, Xof};
 
-use crate::{CanObserve, CanSample};
+use crate::fs::{ByteCodec, DefaultCodec};
+use crate::{CanObserve, CanSample, CanSampleBits};
 
 /// SHAKE128 rate, in bytes.
 const SHAKE128_RATE: usize = 168;
@@ -80,6 +81,27 @@ impl CanSample<u8> for Shake128 {
         // Bulk callers should use `squeeze_into_vec` directly to avoid the per-byte rebuild cost.
         self.squeeze_into_vec(1)[0]
     }
+}
+
+impl CanSampleBits<usize> for Shake128 {
+    fn sample_bits(&mut self, bits: usize) -> usize {
+        assert!(bits < usize::BITS as usize);
+        if bits == 0 {
+            return 0;
+        }
+
+        let byte_len = bits.div_ceil(8);
+        let bytes = self.squeeze_into_vec(byte_len);
+        let mut value = 0usize;
+        for (i, byte) in bytes.into_iter().enumerate() {
+            value |= (byte as usize) << (8 * i);
+        }
+        value & ((1usize << bits) - 1)
+    }
+}
+
+impl DefaultCodec<u8> for Shake128 {
+    type Codec = ByteCodec;
 }
 
 #[cfg(test)]

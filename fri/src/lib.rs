@@ -8,7 +8,10 @@ mod config;
 mod hiding_pcs;
 mod periodic;
 mod proof;
+pub mod protocol;
 pub mod prover;
+#[cfg(test)]
+mod test;
 mod two_adic_pcs;
 pub mod verifier;
 

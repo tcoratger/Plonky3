@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 
 use p3_symmetric::CryptographicHasher;
 
+use crate::fs::{ByteCodec, DefaultCodec};
 use crate::{CanFinalizeDigest, CanObserve, CanSample};
 
 /// A generic challenger that uses a cryptographic hash function to generate challenges.
@@ -104,6 +105,13 @@ where
         self.flush();
         core::array::from_fn(|i| self.output_buffer[i].clone())
     }
+}
+
+impl<H, const OUT_LEN: usize> DefaultCodec<u8> for HashChallenger<u8, H, OUT_LEN>
+where
+    H: CryptographicHasher<u8, [u8; OUT_LEN]>,
+{
+    type Codec = ByteCodec;
 }
 
 #[cfg(test)]

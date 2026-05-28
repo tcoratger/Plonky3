@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use core::fmt::Debug;
 
 use p3_field::{ExtensionField, Field};
 use p3_matrix::Matrix;
@@ -18,6 +17,7 @@ pub struct FriParameters<M> {
     pub commit_proof_of_work_bits: usize,
     /// Number of bits for the PoW phase before sampling the queries.
     pub query_proof_of_work_bits: usize,
+    /// The commitment scheme used for FRI folding-round commitments.
     pub mmcs: M,
 }
 
@@ -117,9 +117,6 @@ impl<M> FriParameters<M> {
 /// Whereas `FriParameters` encompasses parameters the end user can set, `FriFoldingStrategy` is
 /// set by the PCS calling FRI, and abstracts over implementation details of the PCS.
 pub trait FriFoldingStrategy<F: Field, EF: ExtensionField<F>> {
-    type InputProof;
-    type InputError: Debug;
-
     /// We can ask FRI to sample extra query bits (LSB) for our own purposes.
     /// They will be passed to our callbacks, but ignored (shifted off) by FRI.
     fn extra_query_index_bits(&self) -> usize;

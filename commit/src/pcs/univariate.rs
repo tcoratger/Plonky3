@@ -3,6 +3,7 @@
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
+use p3_challenger::fs::{ProverState, VerifierState};
 use p3_field::ExtensionField;
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
@@ -52,9 +53,6 @@ where
 
     /// Type of the output of `get_evaluations_on_domain`.
     type EvaluationsOnDomain<'a>: Matrix<Val<Self::Domain>> + 'a;
-
-    /// The opening argument.
-    type Proof: Clone + Serialize + DeserializeOwned;
 
     /// The type of a proof verification error.
     type Error: Debug;
@@ -181,7 +179,7 @@ where
     /// - `commitment_data_with_opening_points`: A vector whose elements are a pair:
     ///     - `data`: The prover data corresponding to a multi-matrix commitment.
     ///     - `opening_points`: A vector containing, for each matrix committed to, a vector of opening points.
-    /// - `fiat_shamir_challenger`: The challenger that will be used to generate the proof.
+    /// - `transcript`: The transcript that will be used to generate the proof.
     ///
     /// Unwrapping the arguments further, each `data` contains a vector of the committed matrices (`matrices = Vec<M>`).
     /// If the length of `matrices` is not equal to the length of `opening_points` the function will error. Otherwise, for
@@ -204,8 +202,8 @@ where
                 Vec<Challenge>,
             >,
         )>,
-        fiat_shamir_challenger: &mut Challenger,
-    ) -> (OpenedValues<Challenge>, Self::Proof);
+        transcript: &mut ProverState<Challenger>,
+    );
 
     /// Open a collection of polynomial commitments at a set of points, when there is preprocessing data.
     /// It is the same as `open` when `ZK` is disabled.
@@ -215,7 +213,7 @@ where
     /// - `commitment_data_with_opening_points`: A vector whose elements are a pair:
     ///     - `data`: The prover data corresponding to a multi-matrix commitment.
     ///     - `opening_points`: A vector containing, for each matrix committed to, a vector of opening points.
-    /// - `fiat_shamir_challenger`: The challenger that will be used to generate the proof.
+    /// - `transcript`: The transcript that will be used to generate the proof.
     /// - `is_preprocessing`: If one of the committed matrices corresponds to preprocessed columns, this is the index of that matrix.
     ///
     /// Unwrapping the arguments further, each `data` contains a vector of the committed matrices (`matrices = Vec<M>`).
@@ -239,14 +237,14 @@ where
                 Vec<Challenge>,
             >,
         )>,
-        fiat_shamir_challenger: &mut Challenger,
+        transcript: &mut ProverState<Challenger>,
         _is_preprocessing: bool,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
+    ) {
         debug_assert!(
             !Self::ZK,
             "open_with_preprocessing should have a different implementation when ZK is enabled"
         );
-        self.open(commitment_data_with_opening_points, fiat_shamir_challenger)
+        self.open(commitment_data_with_opening_points, transcript)
     }
 
     /// Verify that a collection of opened values is correct.
@@ -255,8 +253,7 @@ where
     /// - `commitments_with_opening_points`: A vector whose elements are a pair:
     ///     - `commitment`: A multi matrix commitment.
     ///     - `opening_points`: A vector containing, for each matrix committed to, a vector of opening points and claimed evaluations.
-    /// - `proof`: A claimed proof of correctness for the opened values.
-    /// - `fiat_shamir_challenger`: The challenger that will be used to generate the proof.
+    /// - `transcript`: The transcript that will be used to generate the proof.
     #[allow(clippy::type_complexity)]
     fn verify(
         &self,
@@ -277,9 +274,7 @@ where
                 )>,
             )>,
         )>,
-        // The opening proof for all claimed evaluations.
-        proof: &Self::Proof,
-        fiat_shamir_challenger: &mut Challenger,
+        transcript: &mut VerifierState<'_, Challenger>,
     ) -> Result<(), Self::Error>;
 
     fn get_opt_randomization_poly_commitment(

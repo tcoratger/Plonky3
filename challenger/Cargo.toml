@@ -22,6 +22,9 @@ thiserror.workspace = true
 tiny-keccak = { workspace = true, features = ["shake"] }
 tracing.workspace = true
 
+[features]
+debug = []
+
 [dev-dependencies]
 p3-baby-bear = { path = "../baby-bear" }
 p3-goldilocks = { path = "../goldilocks" }

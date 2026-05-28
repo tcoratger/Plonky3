@@ -12,7 +12,7 @@ use p3_util::log2_strict_usize;
 use p3_util::zip_eq::zip_eq;
 use serde::{Deserialize, Serialize};
 
-use crate::{BuildPeriodicLdeTableFast, OpenedValues, Pcs, PolynomialSpace};
+use crate::{BuildPeriodicLdeTableFast, Pcs, PolynomialSpace};
 
 /// A trivial PCS: its commitment is simply the coefficients of each poly.
 #[derive(Clone, Debug)]
@@ -50,7 +50,6 @@ where
     type Commitment = Vec<Vec<Val>>;
     type ProverData = Vec<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = Dft::Evaluations;
-    type Proof = ();
     type Error = ();
     const ZK: bool = false;
 
@@ -146,28 +145,17 @@ where
                 Vec<Challenge>,
             >,
         )>,
-        _challenger: &mut Challenger,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
-        (
-            rounds
-                .into_iter()
-                .map(|(coeffs_for_round, points_for_round)| {
-                    // ensure that each matrix corresponds to a set of opening points
-                    debug_assert_eq!(coeffs_for_round.len(), points_for_round.len());
-                    coeffs_for_round
-                        .iter()
-                        .zip(points_for_round)
-                        .map(|(coeffs_for_mat, points_for_mat)| {
-                            points_for_mat
-                                .into_iter()
-                                .map(|pt| eval_coeffs_at_pt(coeffs_for_mat, pt))
-                                .collect()
-                        })
-                        .collect()
-                })
-                .collect(),
-            (),
-        )
+        _transcript: &mut p3_challenger::fs::ProverState<Challenger>,
+    ) {
+        for (coeffs_for_round, points_for_round) in rounds {
+            // ensure that each matrix corresponds to a set of opening points
+            debug_assert_eq!(coeffs_for_round.len(), points_for_round.len());
+            for (coeffs_for_mat, points_for_mat) in coeffs_for_round.iter().zip(points_for_round) {
+                for pt in points_for_mat {
+                    let _ = eval_coeffs_at_pt(coeffs_for_mat, pt);
+                }
+            }
+        }
     }
 
     // This is a testing function, so we allow panics for convenience.
@@ -189,8 +177,7 @@ where
                 )>,
             )>,
         )>,
-        _proof: &Self::Proof,
-        _challenger: &mut Challenger,
+        _transcript: &mut p3_challenger::fs::VerifierState<'_, Challenger>,
     ) -> Result<(), Self::Error> {
         for (comm, round_opening) in rounds {
             for (coeff_vec, (domain, points_and_values)) in zip_eq(comm, round_opening, ())? {

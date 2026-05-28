@@ -14,7 +14,10 @@ mod pcs;
 mod periodic;
 mod point;
 mod proof;
+pub mod protocol;
 mod prover;
+#[cfg(test)]
+mod test;
 mod verifier;
 
 pub use cfft::*;
@@ -22,4 +25,3 @@ pub use domain::*;
 pub use ordering::*;
 pub use pcs::*;
 pub use periodic::*;
-pub use proof::*;

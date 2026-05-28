@@ -1,26 +1,26 @@
 use alloc::vec::Vec;
 
 use itertools::Itertools;
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{
-    BatchOpening, BuildPeriodicLdeTableFast, Mmcs, OpenedValues, Pcs, PolynomialSpace,
-};
+use p3_challenger::fs::{DefaultCodec, ProverState, VerifierState};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_commit::{BuildPeriodicLdeTableFast, Mmcs, MmcsReader, MmcsWriter, Pcs, PolynomialSpace};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
-use p3_field::{ExtensionField, TwoAdicField, batch_multiplicative_inverse};
+use p3_field::{ExtensionField, PrimeField, TwoAdicField, batch_multiplicative_inverse};
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversalPerm, BitReversibleMatrix};
 use p3_matrix::dense::{DenseMatrix, RowMajorMatrix, RowMajorMatrixCow};
 use p3_matrix::horizontally_truncated::HorizontallyTruncated;
 use p3_matrix::row_index_mapped::RowIndexMappedView;
-use p3_util::zip_eq::zip_eq;
 use rand::distr::{Distribution, StandardUniform};
 use rand::{Rng, RngExt};
 use spin::Mutex;
 use tracing::info_span;
 
 use crate::verifier::FriError;
-use crate::{FriParameters, FriProof, TwoAdicFriPcs};
+use crate::{
+    CommitmentWithOpeningPoints, FriParameters, ProverDataWithOpeningPoints, TwoAdicFriPcs,
+};
 
 /// A hiding FRI PCS. Both MMCSs must also be hiding; this is not enforced at compile time so it's
 /// the user's responsibility to configure.
@@ -63,19 +63,31 @@ impl<Val, Dft, InputMmcs, FriMmcs, R> HidingFriPcs<Val, Dft, InputMmcs, FriMmcs,
             rng: Mutex::new(rng),
         }
     }
+
+    pub fn input_mmcs(&self) -> &InputMmcs {
+        self.inner.input_mmcs()
+    }
+
+    pub fn params(&self) -> &FriParameters<FriMmcs> {
+        self.inner.params()
+    }
+
+    pub fn num_random_codewords(&self) -> usize {
+        self.num_random_codewords
+    }
 }
 
 impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger, R> Pcs<Challenge, Challenger>
     for HidingFriPcs<Val, Dft, InputMmcs, FriMmcs, R>
 where
-    Val: TwoAdicField,
+    Val: TwoAdicField + PrimeField,
     StandardUniform: Distribution<Val>,
     Dft: TwoAdicSubgroupDft<Val>,
-    InputMmcs: Mmcs<Val, Proof: Sync, Error: Sync>,
-    FriMmcs: Mmcs<Challenge>,
+    InputMmcs:
+        MmcsWriter<Val, Digest = Val> + MmcsReader<Val, Digest = Val, Proof: Sync, Error: Sync>,
+    FriMmcs: MmcsWriter<Challenge, Digest = Val> + MmcsReader<Challenge, Digest = Val>,
     Challenge: TwoAdicField + ExtensionField<Val>,
-    Challenger:
-        FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
+    Challenger: FieldChallenger<Val> + GrindingChallenger<Witness = Val> + DefaultCodec<Val>,
     R: Rng + Send + Sync,
 {
     type Domain = TwoAdicMultiplicativeCoset<Val>;
@@ -83,12 +95,6 @@ where
     type ProverData = InputMmcs::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> =
         HorizontallyTruncated<Val, RowIndexMappedView<BitReversalPerm, RowMajorMatrixCow<'a, Val>>>;
-    /// The first item contains the openings of the random polynomials added by this wrapper.
-    /// The second item is the usual FRI proof.
-    type Proof = (
-        OpenedValues<Challenge>,
-        FriProof<Challenge, FriMmcs, Val, Vec<BatchOpening<Val, InputMmcs>>>,
-    );
     type Error = FriError<FriMmcs::Error, InputMmcs::Error>;
 
     const ZK: bool = true;
@@ -288,108 +294,42 @@ where
 
     fn open(
         &self,
-        // For each round,
-        rounds: Vec<(
-            &Self::ProverData,
-            // for each matrix,
-            Vec<
-                // points to open
-                Vec<Challenge>,
-            >,
-        )>,
-        challenger: &mut Challenger,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
-        self.open_with_preprocessing(rounds, challenger, false)
+        commitment_data_with_opening_points: Vec<
+            ProverDataWithOpeningPoints<'_, Challenge, Self::ProverData>,
+        >,
+        transcript: &mut ProverState<Challenger>,
+    ) {
+        self.open_with_preprocessing(commitment_data_with_opening_points, transcript, false)
     }
 
     fn open_with_preprocessing(
         &self,
-        // For each round,
-        rounds: Vec<(
-            &Self::ProverData,
-            // for each matrix,
-            Vec<
-                // points to open
-                Vec<Challenge>,
-            >,
-        )>,
-        challenger: &mut Challenger,
+        commitment_data_with_opening_points: Vec<
+            ProverDataWithOpeningPoints<'_, Challenge, Self::ProverData>,
+        >,
+        transcript: &mut ProverState<Challenger>,
         is_preprocessing: bool,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
-        let (mut inner_opened_values, inner_proof) =
-            self.inner
-                .open_with_preprocessing(rounds, challenger, is_preprocessing);
-        // inner_opened_values includes opened values for the random codewords. Those should be
-        // hidden from our caller, so we split them off and store them in the proof.
-        let opened_values_rand = inner_opened_values
-            .iter_mut()
-            .enumerate()
-            .map(|(idx, opened_values_for_round)| {
-                opened_values_for_round
-                    .iter_mut()
-                    .map(|opened_values_for_mat| {
-                        opened_values_for_mat
-                            .iter_mut()
-                            .map(|opened_values_for_point| {
-                                let num_random_codewords =
-                                    if is_preprocessing && idx == <Self as Pcs<Challenge, Challenger>>::PREPROCESSED_TRACE_IDX {
-                                        0
-                                    } else {
-                                        self.num_random_codewords
-                                    };
-                                let split = opened_values_for_point.len() - num_random_codewords;
-                                opened_values_for_point.drain(split..).collect()
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
-            .collect();
-
-        (inner_opened_values, (opened_values_rand, inner_proof))
+    ) {
+        Pcs::<Challenge, Challenger>::open_with_preprocessing(
+            &self.inner,
+            commitment_data_with_opening_points,
+            transcript,
+            is_preprocessing,
+        );
     }
 
     fn verify(
         &self,
-        // For each round:
-        mut rounds: Vec<(
-            Self::Commitment,
-            // for each matrix:
-            Vec<(
-                // its domain,
-                Self::Domain,
-                // for each point:
-                Vec<(
-                    // the point,
-                    Challenge,
-                    // values at the point
-                    Vec<Challenge>,
-                )>,
-            )>,
-        )>,
-        proof: &Self::Proof,
-        challenger: &mut Challenger,
+        commitments_with_opening_points: Vec<
+            CommitmentWithOpeningPoints<Challenge, Self::Commitment, Self::Domain>,
+        >,
+        transcript: &mut VerifierState<'_, Challenger>,
     ) -> Result<(), Self::Error> {
-        let (opened_values_for_rand_cws, inner_proof) = proof;
-        // Now we merge `opened_values_for_rand_cws` into the opened values in `rounds`, undoing
-        // the split that we did in `open`, to get a complete set of opened values for the inner PCS
-        // to check.
-        for (round, rand_round) in zip_eq(
-            rounds.iter_mut(),
-            opened_values_for_rand_cws,
-            FriError::InvalidProofShape,
-        )? {
-            for (mat, rand_mat) in
-                zip_eq(round.1.iter_mut(), rand_round, FriError::InvalidProofShape)?
-            {
-                for (point, rand_point) in
-                    zip_eq(mat.1.iter_mut(), rand_mat, FriError::InvalidProofShape)?
-                {
-                    point.1.extend(rand_point);
-                }
-            }
-        }
-        self.inner.verify(rounds, inner_proof, challenger)
+        Pcs::<Challenge, Challenger>::verify(
+            &self.inner,
+            commitments_with_opening_points,
+            transcript,
+        )
     }
 
     fn get_opt_randomization_poly_commitment(

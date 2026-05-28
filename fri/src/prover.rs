@@ -1,19 +1,20 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use core::iter;
 
 use itertools::{Itertools, izip};
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{BatchOpening, Mmcs};
+use p3_challenger::fs::{DefaultCodec, ExtensionFieldCodec, FieldToFieldCodec, ProverState};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_commit::{BatchDimensions, Mmcs, MmcsWriter};
 use p3_dft::{Radix2DFTSmallBatch, TwoAdicSubgroupDft};
-use p3_field::{ExtensionField, Field, TwoAdicField};
+use p3_field::{ExtensionField, PrimeField, TwoAdicField};
+use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_util::{log2_strict_usize, reverse_slice_index_bits};
 use tracing::{debug_span, info_span, instrument};
 
+use crate::protocol::{FriLabels, FriLabelsDefault};
 use crate::{
-    CommitPhaseProofStep, FriFoldingStrategy, FriParameters, FriProof, ProverDataWithOpeningPoints,
-    QueryProof, compute_log_arity_for_round,
+    FriFoldingStrategy, FriParameters, ProverDataWithOpeningPoints, compute_log_arity_for_round,
 };
 
 /// Create a proof that an opening `f(zeta)` is correct by proving that the
@@ -35,7 +36,7 @@ use crate::{
 /// - `params`: The parameters for the specific FRI protocol instance.
 /// - `inputs`: The evaluation vectors of all polynomials we are applying FRI to. The function assumes that
 ///   commitments to these vectors have been produced and observed by the challenger earlier in the protocol.
-/// - `challenger`: The Fiat-Shamir challenger to use for sampling challenges.
+/// - `transcript`: The Fiat-Shamir prover transcript used to write proof data and sample challenges.
 /// - `log_global_max_height`: The log of the maximum height of the input matrices.
 /// - `prover_data_with_opening_points`: A list of pairs of a batch commitment to a collection
 ///   of matrices and a list of points to open those matrices at.
@@ -44,7 +45,7 @@ pub fn prove_fri<Folding, Val, Challenge, InputMmcs, FriMmcs, Challenger>(
     folding: &Folding,
     params: &FriParameters<FriMmcs>,
     inputs: Vec<Vec<Challenge>>,
-    challenger: &mut Challenger,
+    transcript: &mut ProverState<Challenger>,
     log_global_max_height: usize,
     prover_data_with_opening_points: &[ProverDataWithOpeningPoints<
         '_,
@@ -52,14 +53,16 @@ pub fn prove_fri<Folding, Val, Challenge, InputMmcs, FriMmcs, Challenger>(
         InputMmcs::ProverData<RowMajorMatrix<Val>>,
     >],
     input_mmcs: &InputMmcs,
-) -> FriProof<Challenge, FriMmcs, Challenger::Witness, Folding::InputProof>
-where
-    Val: TwoAdicField,
+) where
+    Val: TwoAdicField + PrimeField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
-    Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
-    Folding: FriFoldingStrategy<Val, Challenge, InputProof = Vec<BatchOpening<Val, InputMmcs>>>,
+    InputMmcs: MmcsWriter<Val>,
+    FriMmcs: MmcsWriter<Challenge>,
+    Challenger: FieldChallenger<Val>
+        + GrindingChallenger<Witness = Val>
+        + DefaultCodec<InputMmcs::Digest>
+        + DefaultCodec<FriMmcs::Digest>,
+    Folding: FriFoldingStrategy<Val, Challenge>,
 {
     assert!(!inputs.is_empty());
     assert!(
@@ -77,23 +80,22 @@ where
         assert!(log_min_height > params.log_final_poly_len + params.log_blowup);
     }
 
+    transcript.begin_protocol::<()>(FriLabelsDefault::PROTOCOL);
+
     // Continually fold the inputs down until the polynomial degree reaches final_poly_degree.
     // Returns a vector of commitments to the intermediate stage polynomials, the intermediate stage polynomials
     // themselves and the final polynomial.
     // Note that the challenger observes the commitments and the final polynomial inside this function so we don't
     // need to observe the output of this function here.
-    let commit_phase_result = commit_phase(folding, params, inputs, challenger);
-
-    // Bind the chosen folding arities into the transcript.
-    for &log_arity in &commit_phase_result.log_arities {
-        challenger.observe(Val::from_usize(log_arity));
-    }
-
+    let commit_phase_data = commit_phase::<_, _, _, _, _>(folding, params, inputs, transcript);
     // Produce a proof of work witness before receiving any query challenges.
     // This helps to prevent grinding attacks.
-    let pow_witness = challenger.grind(params.query_proof_of_work_bits);
+    transcript.pow(
+        FriLabelsDefault::pow_query(params.query_proof_of_work_bits),
+        params.query_proof_of_work_bits,
+    );
 
-    let query_proofs = info_span!("query phase").in_scope(|| {
+    info_span!("query phase").in_scope(|| {
         // Sample num_queries indexes to check.
         // The probability that no two FRI indices are equal (ignoring extra query index bits) is:
         // (Grabbed this from wikipedia page on the birthday problem)
@@ -103,44 +105,33 @@ where
         // With num_queries = 100, N = 2^20, this is 0.995 so there is a .5% chance of a collision.
         // Due to this, security conscious users may want to set num_queries a little higher than the
         // theoretical minimum.
-        iter::repeat_with(|| {
-            let index = challenger.sample_bits(log_max_height + folding.extra_query_index_bits());
+        for query in 0..params.num_queries {
+            let index = transcript
+                .challenge_bits(
+                    FriLabelsDefault::query_index(query),
+                    log_max_height + folding.extra_query_index_bits(),
+                )
+                .into_inner();
             // For each index, create a proof that the folding operations along the chain are correct.
             // With variable arity, the index shifts by log_arity each round.
-            QueryProof {
-                input_proof: open_input(
-                    log_global_max_height,
-                    index,
-                    prover_data_with_opening_points,
-                    input_mmcs,
-                ),
-                commit_phase_openings: answer_query(
-                    params,
-                    &commit_phase_result.log_arities,
-                    &commit_phase_result.data,
-                    index >> folding.extra_query_index_bits(),
-                ),
-            }
-        })
-        .take(params.num_queries)
-        .collect()
+            open_input::<_, _, _, _>(
+                query,
+                log_global_max_height,
+                index,
+                prover_data_with_opening_points,
+                input_mmcs,
+                transcript,
+            );
+            answer_query::<_, _, _, _>(
+                query,
+                &params.mmcs,
+                &commit_phase_data,
+                index >> folding.extra_query_index_bits(),
+                transcript,
+            );
+        }
     });
-
-    FriProof {
-        commit_phase_commits: commit_phase_result.commits,
-        commit_pow_witnesses: commit_phase_result.pow_witnesses,
-        query_proofs,
-        final_poly: commit_phase_result.final_poly,
-        query_pow_witness: pow_witness,
-    }
-}
-
-struct CommitPhaseResult<F: Field, M: Mmcs<F>, Witness> {
-    commits: Vec<M::Commitment>,
-    data: Vec<M::ProverData<RowMajorMatrix<F>>>,
-    log_arities: Vec<usize>,
-    pow_witnesses: Vec<Witness>,
-    final_poly: Vec<F>,
+    transcript.end_protocol::<()>(FriLabelsDefault::PROTOCOL);
 }
 
 /// Perform the commit phase of the FRI protocol.
@@ -163,35 +154,34 @@ struct CommitPhaseResult<F: Field, M: Mmcs<F>, Witness> {
 /// - `inputs`: The evaluation vectors of the polynomials. These must be sorted in descending order of length and each
 ///   evaluation vector must be in bit reversed order. This function assumes that commitments to these vectors
 ///   have already been produced and observed by the challenger.
-/// - `challenger`: The Fiat-Shamir challenger to use for sampling challenges.
-#[instrument(name = "commit phase", skip_all)]
+/// - `transcript`: The Fiat-Shamir prover transcript used to write proof data and sample challenges.
+#[instrument(skip_all)]
 fn commit_phase<Folding, Val, Challenge, M, Challenger>(
     folding: &Folding,
     params: &FriParameters<M>,
     inputs: Vec<Vec<Challenge>>,
-    challenger: &mut Challenger,
-) -> CommitPhaseResult<Challenge, M, <Challenger as GrindingChallenger>::Witness>
+    transcript: &mut ProverState<Challenger>,
+) -> Vec<M::ProverData<RowMajorMatrix<Challenge>>>
 where
-    Val: TwoAdicField,
+    Val: TwoAdicField + PrimeField,
     Challenge: ExtensionField<Val>,
-    M: Mmcs<Challenge>,
-    Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<M::Commitment>,
+    M: MmcsWriter<Challenge>,
+    Challenger: FieldChallenger<Val> + GrindingChallenger<Witness = Val> + DefaultCodec<M::Digest>,
     Folding: FriFoldingStrategy<Val, Challenge>,
 {
     let mut inputs_iter = inputs.into_iter().peekable();
     let mut folded = inputs_iter.next().unwrap();
-    let mut commits = vec![];
     let mut data = vec![];
     let mut log_arities = vec![];
-    let mut pow_witnesses = vec![];
 
     let log_final_height = params.log_blowup + params.log_final_poly_len;
 
+    let mut round = 0;
     while folded.len() > params.blowup() * params.final_poly_len() {
         let log_current_height = log2_strict_usize(folded.len());
         let next_input_log_height = inputs_iter.peek().map(|v| log2_strict_usize(v.len()));
 
-        //Compute the arity for this round
+        // Compute the arity for this round.
         let log_arity = compute_log_arity_for_round(
             log_current_height,
             next_input_log_height,
@@ -206,21 +196,31 @@ where
         let leaves = RowMajorMatrix::new(folded, arity);
 
         // Commit to these evaluations and observe the commitment.
-        let (commit, prover_data) = params.mmcs.commit_matrix(leaves);
-        challenger.observe(commit.clone());
-        commits.push(commit);
+        let (commitment, prover_data) = Mmcs::commit(&params.mmcs, vec![leaves]);
+        params.mmcs.write_commitment(
+            transcript,
+            FriLabelsDefault::round_commitment(round),
+            commitment,
+        );
 
         // Produce a proof of work witness after observing the commitment and
         // before the Fiat-Shamir batching challenge.
-        let pow_witness = challenger.grind(params.commit_proof_of_work_bits);
-        pow_witnesses.push(pow_witness);
+        transcript.pow(
+            FriLabelsDefault::pow_round(params.commit_proof_of_work_bits, round),
+            params.commit_proof_of_work_bits,
+        );
 
         // Get the Fiat-Shamir challenge for this round.
-        let beta: Challenge = challenger.sample_algebra_element();
+        let beta = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(FriLabelsDefault::beta(
+                round,
+            ))
+            .into_inner();
+        round += 1;
 
-        // We passed ownership of `leaves` to the MMCS, so get a reference to it
+        // We passed ownership of `leaves` to the MMCS, so get a reference to it.
         let leaves = params.mmcs.get_matrices(&prover_data).pop().unwrap();
-        // Do the folding operation with the computed arity
+        // Do the folding operation with the computed arity.
         folded = folding.fold_matrix(beta, log_arity, leaves.as_view());
 
         data.push(prover_data);
@@ -244,16 +244,24 @@ where
     let final_poly = debug_span!("idft final poly")
         .in_scope(|| Radix2DFTSmallBatch::default().idft_algebra(folded));
 
-    // Observe all coefficients of the final polynomial.
-    challenger.observe_algebra_slice(&final_poly);
+    // Write all coefficients of the final polynomial.
+    transcript.add_extensions::<Val, Challenge, FieldToFieldCodec<Val>>(
+        FriLabelsDefault::final_poly(),
+        &final_poly,
+    );
 
-    CommitPhaseResult {
-        commits,
-        data,
-        log_arities,
-        pow_witnesses,
-        final_poly,
-    }
+    // Bind the chosen folding arities into the transcript.
+    let log_arity_values = log_arities
+        .iter()
+        .map(|&log_arity| Val::from_usize(log_arity))
+        .collect::<Vec<_>>();
+
+    transcript.add_scalars::<Val, FieldToFieldCodec<Val>>(
+        FriLabelsDefault::log_arities(),
+        &log_arity_values,
+    );
+
+    data
 }
 
 /// Given an `index` produce a proof that the chain of folds are correct.
@@ -270,67 +278,65 @@ where
 /// (i.e. when arity is fixed to 2).
 ///
 /// Arguments:
-/// - `params`: The parameters for the specific FRI protocol instance.
-/// - `log_arities`: The log2 of the arity used for each round.
+/// - `query`: The FRI query number.
+/// - `mmcs`: The commitment scheme for FRI fold commitments.
 /// - `folded_polynomial_commits`: A slice of commitments to the intermediate stage polynomials.
 /// - `start_index`: The opening index for the unfolded polynomial.
+/// - `transcript`: The Fiat-Shamir prover transcript
 #[inline]
-fn answer_query<F, M>(
-    config: &FriParameters<M>,
-    log_arities: &[usize],
+fn answer_query<Val, F, M, Challenger>(
+    query: usize,
+    mmcs: &M,
     folded_polynomial_commits: &[M::ProverData<RowMajorMatrix<F>>],
     start_index: usize,
-) -> Vec<CommitPhaseProofStep<F, M>>
-where
-    F: Field,
-    M: Mmcs<F>,
+    transcript: &mut ProverState<Challenger>,
+) where
+    Val: PrimeField,
+    F: ExtensionField<Val>,
+    M: MmcsWriter<F>,
+    Challenger: FieldChallenger<Val> + DefaultCodec<M::Digest>,
 {
     let mut current_index = start_index;
 
-    folded_polynomial_commits
-        .iter()
-        .enumerate()
-        .map(|(i, commit)| {
-            let log_arity = log_arities[i];
-            let arity = 1 << log_arity;
+    for (round, prover_data) in folded_polynomial_commits.iter().enumerate() {
+        let matrix = mmcs.get_matrices(prover_data).pop().unwrap();
+        let arity = matrix.width();
+        let log_arity = log2_strict_usize(arity);
 
-            // Index of this element within its group of `arity` elements
-            let index_in_group = current_index % arity;
-            // Index of the group (row in the committed matrix)
-            let group_index = current_index >> log_arity;
+        // Index of this element within its group of `arity` elements.
+        let index_in_group = current_index % arity;
+        // Index of the group, i.e. the row in the committed matrix.
+        let group_index = current_index >> log_arity;
 
-            // Get a proof that the group of indices are correct.
-            let (mut opened_rows, opening_proof) =
-                config.mmcs.open_batch(group_index, commit).unpack();
+        // Get a proof that the group of evaluations is correct.
+        let (mut opened_rows, opening_proof) =
+            Mmcs::open_batch(mmcs, group_index, prover_data).unpack();
 
-            // opened_rows should contain just the values in this group.
-            assert_eq!(opened_rows.len(), 1);
-            let opened_row = opened_rows.pop().unwrap();
-            assert_eq!(
-                opened_row.len(),
-                arity,
-                "Committed data should have arity {} elements",
-                arity
-            );
+        // opened_rows should contain just the values in this group.
+        assert_eq!(opened_rows.len(), 1);
+        let mut opened_row = opened_rows.pop().unwrap();
+        assert_eq!(
+            opened_row.len(),
+            arity,
+            "Committed data should have arity {} elements",
+            arity
+        );
 
-            // Get all siblings (exclude self)
-            let sibling_values: Vec<_> = opened_row
-                .into_iter()
-                .enumerate()
-                .filter(|(j, _)| *j != index_in_group)
-                .map(|(_, v)| v)
-                .collect();
+        // Write all siblings, excluding the queried value, along with the opening proof.
+        opened_row.remove(index_in_group);
+        transcript.add_hints::<F, ExtensionFieldCodec<Val, F, FieldToFieldCodec<Val>>>(
+            FriLabelsDefault::sibling_values(query, round),
+            &opened_row,
+        );
+        mmcs.write_proof_hint(
+            transcript,
+            FriLabelsDefault::round_opening_proof(query, round),
+            &BatchDimensions::single(matrix.dimensions()),
+            opening_proof,
+        );
 
-            current_index = group_index;
-
-            // Add the siblings and the proof to the vector.
-            CommitPhaseProofStep {
-                log_arity: log_arity as u8,
-                sibling_values,
-                opening_proof,
-            }
-        })
-        .collect()
+        current_index = group_index;
+    }
 }
 
 /// Given an index, produce batch opening proofs for each collection of matrices
@@ -340,13 +346,14 @@ where
 /// global max height, shift the index down to compensate.
 ///
 /// Arguments:
+/// - `query`: The FRI query number.
 /// - `log_global_max_height`: The log of the maximum height of the input matrices.
 /// - `index`: The index to open the matrices at.
 /// - `prover_data_with_opening_points`: A list of pairs of a batch commitment to a collection
 ///   of matrices and a list of points to open those matrices at.
 /// - `mmcs`: The mixed matrix commitment scheme used to produce the batch commitments.
-#[inline]
-fn open_input<Val, Challenge, InputMmcs>(
+fn open_input<Val, Challenge, InputMmcs, Challenger>(
+    query: usize,
     log_global_max_height: usize,
     index: usize,
     prover_data_with_opening_points: &[ProverDataWithOpeningPoints<
@@ -355,24 +362,44 @@ fn open_input<Val, Challenge, InputMmcs>(
         InputMmcs::ProverData<RowMajorMatrix<Val>>,
     >],
     mmcs: &InputMmcs,
-) -> Vec<BatchOpening<Val, InputMmcs>>
-where
-    Val: TwoAdicField,
+    transcript: &mut ProverState<Challenger>,
+) where
+    Val: TwoAdicField + PrimeField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val>,
+    InputMmcs: MmcsWriter<Val>,
+    Challenger: FieldChallenger<Val> + DefaultCodec<InputMmcs::Digest>,
 {
     // This gives the verifier access to evaluations `f(x)` from which it can compute
     // `(f(zeta) - f(x))/(zeta - x)` and then combine them together and roll into FRI
     // as appropriate.
-    prover_data_with_opening_points
-        .iter()
-        .map(|(data, _)| {
-            let log_max_height = log2_strict_usize(mmcs.get_max_height(data));
-            let bits_reduced = log_global_max_height - log_max_height;
-            // If a matrix is smaller than global max height, we roll it into
-            // fri in a later round.
-            let reduced_index = index >> bits_reduced;
-            mmcs.open_batch(reduced_index, data)
-        })
-        .collect()
+    for (batch, (data, _)) in prover_data_with_opening_points.iter().enumerate() {
+        let log_max_height = log2_strict_usize(mmcs.get_max_height(data));
+        let bits_reduced = log_global_max_height - log_max_height;
+        // If a matrix is smaller than global max height, we roll it into
+        // fri in a later round.
+        let reduced_index = index >> bits_reduced;
+        let (opened_values, opening_proof) = Mmcs::open_batch(mmcs, reduced_index, data).unpack();
+        let dimensions = mmcs
+            .get_matrices(data)
+            .iter()
+            .map(|matrix| matrix.dimensions())
+            .collect::<Vec<_>>();
+        let dimensions = BatchDimensions::from(dimensions);
+        assert_eq!(opened_values.len(), dimensions.len());
+        for (matrix, (opened_values, dimensions)) in
+            opened_values.iter().zip(dimensions.iter()).enumerate()
+        {
+            assert_eq!(opened_values.len(), dimensions.width);
+            transcript.add_hints::<Val, FieldToFieldCodec<Val>>(
+                FriLabelsDefault::input_opened_values(query, batch, matrix),
+                opened_values,
+            );
+        }
+        mmcs.write_proof_hint(
+            transcript,
+            FriLabelsDefault::input_opening_proof(query, batch),
+            &dimensions,
+            opening_proof,
+        );
+    }
 }

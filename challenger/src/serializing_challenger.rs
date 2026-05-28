@@ -7,6 +7,7 @@ use p3_symmetric::{CryptographicHasher, Hash, MerkleCap};
 use p3_util::log2_ceil_u64;
 use tracing::instrument;
 
+use crate::fs::{ByteCodec, DefaultCodec};
 use crate::{
     CanFinalizeDigest, CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, FieldChallenger,
     GrindingChallenger, HashChallenger, ResamplingError,
@@ -23,7 +24,7 @@ use crate::{
 ///    range (0..1 << log_2(p)). This avoids modulo bias.
 #[derive(Clone, Debug)]
 pub struct SerializingChallenger32<F, Inner> {
-    inner: Inner,
+    pub(crate) inner: Inner,
     _marker: PhantomData<F>,
 }
 
@@ -38,7 +39,7 @@ pub struct SerializingChallenger32<F, Inner> {
 ///    range (0..1 << log_2(p)). This avoids modulo bias.
 #[derive(Clone, Debug)]
 pub struct SerializingChallenger64<F, Inner> {
-    inner: Inner,
+    pub(crate) inner: Inner,
     _marker: PhantomData<F>,
 }
 
@@ -66,6 +67,14 @@ impl<F: PrimeField32, Inner: CanObserve<u8>> CanObserve<F> for SerializingChalle
         self.inner
             .observe_slice(&value.to_unique_u32().to_le_bytes());
     }
+}
+
+impl<F, Inner> DefaultCodec<u8> for SerializingChallenger32<F, Inner>
+where
+    F: PrimeField32,
+    Inner: CanObserve<u8> + CanSample<u8>,
+{
+    type Codec = ByteCodec;
 }
 
 impl<F: PrimeField32, const N: usize, Inner: CanObserve<u8>> CanObserve<Hash<F, u8, N>>
@@ -256,6 +265,14 @@ impl<F: PrimeField64, Inner: CanObserve<u8>> CanObserve<F> for SerializingChalle
         self.inner
             .observe_slice(&value.to_unique_u64().to_le_bytes());
     }
+}
+
+impl<F, Inner> DefaultCodec<u8> for SerializingChallenger64<F, Inner>
+where
+    F: PrimeField64,
+    Inner: CanObserve<u8> + CanSample<u8>,
+{
+    type Codec = ByteCodec;
 }
 
 impl<F: PrimeField64, const N: usize, Inner: CanObserve<u8>> CanObserve<Hash<F, u8, N>>

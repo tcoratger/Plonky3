@@ -2,11 +2,16 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ops::Deref;
 
-use p3_field::{ExtensionField, Field};
+use p3_challenger::fs::{
+    DefaultCodec, Interaction, Label, ProverState, TranscriptBound, TranscriptError, VerifierState,
+};
+use p3_field::{ExtensionField, Field, PrimeField};
 use p3_matrix::extension::FlatMatrixView;
 use p3_matrix::{Dimensions, Matrix};
 
-use crate::{BatchOpening, BatchOpeningRef, Mmcs};
+use crate::{
+    BatchDimensions, BatchOpening, BatchOpeningRef, Mmcs, MmcsReader, MmcsTranscript, MmcsWriter,
+};
 
 /// A wrapper to lift an MMCS from a base field `F` to an extension field `EF`.
 ///
@@ -19,6 +24,98 @@ pub struct ExtensionMmcs<F, EF, InnerMmcs> {
     pub(crate) inner: InnerMmcs,
 
     pub(crate) _phantom: PhantomData<(F, EF)>,
+}
+
+impl<F, EF, InnerMmcs> MmcsTranscript<EF> for ExtensionMmcs<F, EF, InnerMmcs>
+where
+    F: Field,
+    EF: ExtensionField<F>,
+    InnerMmcs: MmcsTranscript<F>,
+{
+    type Digest = InnerMmcs::Digest;
+
+    fn append_commitment(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) {
+        self.inner
+            .append_commitment(interactions, label, dimensions);
+    }
+
+    fn append_opening_proof_hint(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) {
+        self.inner
+            .append_opening_proof_hint(interactions, label, dimensions);
+    }
+}
+
+impl<F, EF, InnerMmcs> MmcsWriter<EF> for ExtensionMmcs<F, EF, InnerMmcs>
+where
+    F: PrimeField,
+    EF: ExtensionField<F>,
+    InnerMmcs: MmcsWriter<F>,
+{
+    fn write_commitment<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        label: Label,
+        commitment: Self::Commitment,
+    ) where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        self.inner.write_commitment(transcript, label, commitment);
+    }
+
+    fn write_proof_hint<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+        opening_proof: Self::Proof,
+    ) where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        self.inner
+            .write_proof_hint(transcript, opening_proof_label, dimensions, opening_proof);
+    }
+}
+
+impl<F, EF, InnerMmcs> MmcsReader<EF> for ExtensionMmcs<F, EF, InnerMmcs>
+where
+    F: PrimeField,
+    EF: ExtensionField<F>,
+    InnerMmcs: MmcsReader<F>,
+{
+    fn read_commitment<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<TranscriptBound<Self::Commitment>, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        self.inner.read_commitment(transcript, label, dimensions)
+    }
+
+    fn read_opening_proof<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<Self::Proof, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>,
+    {
+        self.inner
+            .read_opening_proof(transcript, opening_proof_label, dimensions)
+    }
 }
 
 impl<F, EF, InnerMmcs> ExtensionMmcs<F, EF, InnerMmcs> {

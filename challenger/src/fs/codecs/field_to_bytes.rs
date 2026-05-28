@@ -1,11 +1,13 @@
 //! Field-sponge to byte codec.
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use p3_field::{PrimeField32, PrimeField64};
 
 use crate::fs::codecs::Codec;
+use crate::fs::error::TranscriptError;
 use crate::{CanObserve, CanSample};
 
 /// Maps bytes to/from a 32-bit prime-field sponge.
@@ -13,6 +15,7 @@ use crate::{CanObserve, CanSample};
 /// Sample takes the low byte of a uniform field element, which biases by `~1/p`.
 ///
 /// For 128-bit-clean output, route via a byte sponge instead.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct FieldToBytesCodec<F>(PhantomData<F>);
 
 impl<C, F> Codec<C, u8> for FieldToBytesCodec<F>
@@ -33,6 +36,23 @@ where
     fn sample(challenger: &mut C) -> u8 {
         let f: F = challenger.sample();
         f.as_canonical_u32() as u8
+    }
+
+    fn byte_len() -> usize {
+        1
+    }
+
+    fn encode(value: &u8) -> Vec<u8> {
+        vec![*value]
+    }
+
+    fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+        bytes
+            .first()
+            .copied()
+            .ok_or(TranscriptError::BadProofShape {
+                reason: "not enough bytes for a byte encoding",
+            })
     }
 }
 
@@ -56,6 +76,23 @@ where
     fn sample(challenger: &mut C) -> u8 {
         let f: F = challenger.sample();
         f.as_canonical_u64() as u8
+    }
+
+    fn byte_len() -> usize {
+        1
+    }
+
+    fn encode(value: &u8) -> Vec<u8> {
+        vec![*value]
+    }
+
+    fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+        bytes
+            .first()
+            .copied()
+            .ok_or(TranscriptError::BadProofShape {
+                reason: "not enough bytes for a byte encoding",
+            })
     }
 }
 

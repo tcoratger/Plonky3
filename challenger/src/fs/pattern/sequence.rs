@@ -47,7 +47,10 @@ use crate::fs::pattern::step::{Hierarchy, Interaction, Kind};
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
 pub struct InteractionPattern {
     /// The validated sequence in transcript order.
-    interactions: Vec<Interaction>,
+    pub(crate) interactions: Vec<Interaction>,
+    /// Atomic label to interaction index.
+    #[cfg(feature = "debug")]
+    pub(crate) label_to_index: alloc::collections::BTreeMap<crate::fs::pattern::step::Label, usize>,
 }
 
 impl InteractionPattern {
@@ -62,11 +65,18 @@ impl InteractionPattern {
     ///
     /// Walks the sequence once, maintaining a stack of currently-open sub-protocols.
     pub fn new(interactions: Vec<Interaction>) -> Result<Self, TranscriptError> {
+        #[cfg(feature = "debug")]
+        let label_to_index = crate::fs::debug::build_label_to_index(&interactions);
+
         // Build first, validate second.
         //
         // This lets validation report the original positions of offending
         // steps in the recorded sequence.
-        let result = Self { interactions };
+        let result = Self {
+            interactions,
+            #[cfg(feature = "debug")]
+            label_to_index,
+        };
         result.validate()?;
         Ok(result)
     }

@@ -1539,4 +1539,209 @@ mod tests {
             }
         }
     }
+
+    mod transcript {
+
+        use p3_baby_bear::{BabyBear, Poseidon2BabyBear};
+        use p3_challenger::fs::{
+            BytesToFieldCodec, CanObserveBytes, Codec, DefaultCodec, DomainSeparator,
+            FieldToFieldCodec, Hierarchy, Interaction, InteractionPattern, Kind, Length,
+            ProverState, Shake128, VerifierState,
+        };
+        use p3_challenger::{
+            CanSampleBits, DuplexChallenger, HashChallenger, SerializingChallenger32,
+        };
+        use p3_commit::{BatchDimensions, BatchOpening, MmcsReader, MmcsTranscript, MmcsWriter};
+        use p3_field::{Field, PrimeCharacteristicRing, PrimeField};
+        use p3_keccak::Keccak256Hash;
+        use p3_matrix::Dimensions;
+        use p3_matrix::dense::RowMajorMatrix;
+        use p3_symmetric::{
+            CompressionFunctionFromHasher, PaddingFreeSponge, SerializingHasher,
+            TruncatedPermutation,
+        };
+        use rand::SeedableRng;
+        use rand::rngs::SmallRng;
+
+        use crate::MerkleTreeMmcs;
+
+        const WIDTH: usize = 4;
+        const HEIGHT: usize = 16;
+        const LOG_HEIGHT: usize = 4;
+
+        fn dimensions() -> BatchDimensions {
+            alloc::vec![Dimensions {
+                width: WIDTH,
+                height: HEIGHT,
+            }]
+            .into()
+        }
+
+        fn matrix<Val>() -> RowMajorMatrix<Val>
+        where
+            Val: PrimeCharacteristicRing + Send + Sync + Clone,
+        {
+            let values = (1..=WIDTH * HEIGHT).map(Val::from_usize).collect();
+            RowMajorMatrix::new(values, WIDTH)
+        }
+
+        fn domain_separator<Val, M>(mmcs: &M) -> DomainSeparator<u8>
+        where
+            Val: Send + Sync + Clone,
+            M: MmcsTranscript<Val>,
+        {
+            let mut interactions = alloc::vec::Vec::new();
+            mmcs.append_commitment(&mut interactions, "commitment", &dimensions());
+            interactions.push(Interaction::new::<usize>(
+                Hierarchy::Atomic,
+                Kind::Challenge,
+                "opening-index",
+                Length::Bits(LOG_HEIGHT),
+            ));
+            interactions.push(Interaction::new::<Val>(
+                Hierarchy::Atomic,
+                Kind::Hint,
+                "opened-values",
+                Length::Fixed(dimensions().opened_values_len()),
+            ));
+            mmcs.append_opening_proof_hint(&mut interactions, "opening-proof", &dimensions());
+
+            let mut ds = DomainSeparator::new(
+                1,
+                b"fri-merkle-tree-test",
+                InteractionPattern::new(interactions).unwrap(),
+            );
+            ds.bind_pattern_hash();
+            ds
+        }
+
+        fn run_merkle_tree_protocol<Val, Challenger, M, OpenedCdc>(mmcs: M, challenger: Challenger)
+        where
+            Val: PrimeField + PrimeCharacteristicRing + Send + Sync + Clone,
+            Challenger: Clone + CanSampleBits<usize> + CanObserveBytes + DefaultCodec<M::Digest>,
+            M: MmcsWriter<Val> + MmcsReader<Val>,
+            OpenedCdc: Codec<Challenger, Val>,
+        {
+            let dimensions = dimensions();
+            let ds = domain_separator::<Val, M>(&mmcs);
+            let (commitment, prover_data) = mmcs.commit_matrix(matrix::<Val>());
+
+            let proof = {
+                let mut transcript = ProverState::<_, u8>::new(challenger.clone(), &ds);
+                mmcs.write_commitment(&mut transcript, "commitment", commitment);
+                let open_index = transcript
+                    .challenge_bits("opening-index", LOG_HEIGHT)
+                    .into_inner();
+                let (opened_values, opening_proof) =
+                    mmcs.open_batch(open_index, &prover_data).unpack();
+                assert_eq!(opened_values.len(), 1);
+                transcript.add_hints::<Val, OpenedCdc>("opened-values", &opened_values[0]);
+                mmcs.write_proof_hint(&mut transcript, "opening-proof", &dimensions, opening_proof);
+                transcript.finalize()
+            };
+
+            {
+                let mut transcript = VerifierState::<_, u8>::new(challenger, &ds, &proof);
+                let commitment = mmcs
+                    .read_commitment(&mut transcript, "commitment", &dimensions)
+                    .unwrap();
+                let open_index = transcript
+                    .challenge_bits("opening-index", LOG_HEIGHT)
+                    .into_inner();
+                let opened_values = transcript
+                    .next_hints::<Val, OpenedCdc>("opened-values", dimensions.opened_values_len())
+                    .unwrap();
+                let opening_proof = mmcs
+                    .read_opening_proof(&mut transcript, "opening-proof", &dimensions)
+                    .unwrap();
+                let opening = BatchOpening::new(alloc::vec![opened_values], opening_proof);
+
+                mmcs.verify_batch(
+                    commitment.as_inner(),
+                    &dimensions,
+                    open_index,
+                    (&opening).into(),
+                )
+                .unwrap();
+                transcript.finalize().unwrap();
+            }
+        }
+
+        fn seeded_rng() -> SmallRng {
+            SmallRng::seed_from_u64(0)
+        }
+
+        mod babybear_duplex {
+            use super::*;
+
+            type Val = BabyBear;
+            type Perm = Poseidon2BabyBear<16>;
+            type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+            type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+            type MyMmcs = MerkleTreeMmcs<
+                <Val as Field>::Packing,
+                <Val as Field>::Packing,
+                MyHash,
+                MyCompress,
+                2,
+                8,
+            >;
+            type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
+
+            #[test]
+            fn merkle_tree_protocol_round_trip() {
+                let perm = Perm::new_from_rng_128(&mut seeded_rng());
+                let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm.clone()), 0);
+                let challenger = Challenger::new(perm);
+
+                run_merkle_tree_protocol::<Val, Challenger, MyMmcs, FieldToFieldCodec<Val>>(
+                    mmcs, challenger,
+                );
+            }
+        }
+
+        mod babybear_keccak {
+            use super::*;
+
+            type Val = BabyBear;
+            type ByteHash = Keccak256Hash;
+            type FieldHash = SerializingHasher<ByteHash>;
+            type MyCompress = CompressionFunctionFromHasher<ByteHash, 2, 32>;
+            type MyMmcs = MerkleTreeMmcs<Val, u8, FieldHash, MyCompress, 2, 32>;
+            type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
+
+            #[test]
+            fn merkle_tree_protocol_round_trip() {
+                let byte_hash = ByteHash {};
+                let mmcs = MyMmcs::new(FieldHash::new(byte_hash), MyCompress::new(byte_hash), 0);
+                let challenger = Challenger::from_hasher(alloc::vec::Vec::new(), byte_hash);
+
+                run_merkle_tree_protocol::<Val, Challenger, MyMmcs, FieldToFieldCodec<Val>>(
+                    mmcs, challenger,
+                );
+            }
+        }
+
+        mod babybear_shake128 {
+            use super::*;
+
+            type Val = BabyBear;
+            type ByteHash = Keccak256Hash;
+            type FieldHash = SerializingHasher<ByteHash>;
+            type MyCompress = CompressionFunctionFromHasher<ByteHash, 2, 32>;
+            type MyMmcs = MerkleTreeMmcs<Val, u8, FieldHash, MyCompress, 2, 32>;
+            type Challenger = Shake128;
+
+            #[test]
+            fn merkle_tree_protocol_round_trip() {
+                let byte_hash = ByteHash {};
+                let mmcs = MyMmcs::new(FieldHash::new(byte_hash), MyCompress::new(byte_hash), 0);
+                let challenger = Challenger::new(&[0u8; 64]);
+
+                run_merkle_tree_protocol::<Val, Challenger, MyMmcs, BytesToFieldCodec<Val>>(
+                    mmcs, challenger,
+                );
+            }
+        }
+    }
 }

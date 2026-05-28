@@ -4,33 +4,37 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use itertools::{Itertools, izip};
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
+use p3_challenger::fs::{
+    DefaultCodec, ExtensionFieldCodec, FieldToFieldCodec, ProverState, TranscriptError,
+    VerifierState,
+};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_commit::{
-    BatchOpening, BatchOpeningRef, BuildPeriodicLdeTableFast, Mmcs, OpenedValues, Pcs,
-    PeriodicLdeTable, PolynomialSpace,
+    BatchDimensions, BatchOpening, BatchOpeningRef, BuildPeriodicLdeTableFast, Mmcs, MmcsReader,
+    MmcsWriter, OpenedValues, Pcs, PeriodicLdeTable, PolynomialSpace,
 };
 use p3_field::extension::ComplexExtendable;
-use p3_field::{ExtensionField, Field};
-use p3_fri::FriParameters;
+use p3_field::{ExtensionField, Field, PrimeField};
 use p3_fri::verifier::FriError;
+use p3_fri::{CommitmentWithOpeningPoints, FriParameters};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixCow};
 use p3_matrix::row_index_mapped::RowIndexMappedView;
 use p3_matrix::{Dimensions, Matrix};
 use p3_maybe_rayon::prelude::*;
 use p3_util::log2_strict_usize;
 use p3_util::zip_eq::zip_eq;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info_span;
 
 use crate::deep_quotient::{deep_quotient_reduce_row, extract_lambda};
 use crate::domain::CircleDomain;
-use crate::folding::{CircleFriFolding, CircleFriFoldingForMmcs, fold_y, fold_y_row};
+use crate::folding::{CircleFriFolding, fold_y, fold_y_row};
 use crate::point::Point;
+use crate::protocol::{BatchSpec, CircleLabels, CircleLabelsDefault, CircleProtocol, FriLabels};
 use crate::prover::prove;
 use crate::verifier::verify;
 use crate::{
-    CfftPerm, CfftPermutable, CircleEvaluations, CircleFriProof, build_periodic_lde_table_circle,
+    CfftPerm, CfftPermutable, CircleEvaluations, build_periodic_lde_table_circle,
     cfft_permute_index,
 };
 
@@ -51,19 +55,6 @@ impl<Val: Field, InputMmcs, FriMmcs> CirclePcs<Val, InputMmcs, FriMmcs> {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(bound = "")]
-pub struct CircleInputProof<
-    Val: Field,
-    Challenge: Field,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
-> {
-    input_openings: Vec<BatchOpening<Val, InputMmcs>>,
-    first_layer_siblings: Vec<Challenge>,
-    first_layer_proof: FriMmcs::Proof,
-}
-
 #[derive(Debug, Error)]
 pub enum InputError<InputMmcsError, FriMmcsError>
 where
@@ -78,42 +69,22 @@ where
     InputShapeError,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(bound(
-    serialize = "Witness: Serialize",
-    deserialize = "Witness: Deserialize<'de>"
-))]
-pub struct CirclePcsProof<
-    Val: Field,
-    Challenge: Field,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
-    Witness,
-> {
-    first_layer_commitment: FriMmcs::Commitment,
-    lambdas: Vec<Challenge>,
-    fri_proof: CircleFriProof<
-        Challenge,
-        FriMmcs,
-        Witness,
-        CircleInputProof<Val, Challenge, InputMmcs, FriMmcs>,
-    >,
-}
-
 impl<Val, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challenger>
     for CirclePcs<Val, InputMmcs, FriMmcs>
 where
-    Val: ComplexExtendable,
+    Val: ComplexExtendable + PrimeField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: Mmcs<Val>,
-    FriMmcs: Mmcs<Challenge>,
-    Challenger: FieldChallenger<Val> + GrindingChallenger + CanObserve<FriMmcs::Commitment>,
+    InputMmcs: MmcsWriter<Val> + MmcsReader<Val, Proof: Sync, Error: Sync>,
+    FriMmcs: MmcsWriter<Challenge> + MmcsReader<Challenge>,
+    Challenger: FieldChallenger<Val>
+        + GrindingChallenger<Witness = Val>
+        + DefaultCodec<InputMmcs::Digest>
+        + DefaultCodec<FriMmcs::Digest>,
 {
     type Domain = CircleDomain<Val>;
     type Commitment = InputMmcs::Commitment;
     type ProverData = InputMmcs::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = RowIndexMappedView<CfftPerm, RowMajorMatrixCow<'a, Val>>;
-    type Proof = CirclePcsProof<Val, Challenge, InputMmcs, FriMmcs, Challenger::Witness>;
     type Error = FriError<FriMmcs::Error, InputError<InputMmcs::Error, FriMmcs::Error>>;
     const ZK: bool = false;
 
@@ -200,12 +171,13 @@ where
                 Vec<Challenge>,
             >,
         )>,
-        challenger: &mut Challenger,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
+        transcript: &mut ProverState<Challenger>,
+    ) {
         // Open matrices at points
         let values: OpenedValues<Challenge> = rounds
             .iter()
-            .map(|(data, points_for_mats)| {
+            .enumerate()
+            .map(|(batch_index, (data, points_for_mats))| {
                 let mats = self.mmcs.get_matrices(data);
                 debug_assert_eq!(
                     mats.len(),
@@ -213,7 +185,8 @@ where
                     "Mismatched number of matrices and points"
                 );
                 izip!(mats, points_for_mats)
-                    .map(|(mat, points_for_mat)| {
+                    .enumerate()
+                    .map(|(matrix_index, (mat, points_for_mat))| {
                         let log_height = log2_strict_usize(mat.height());
                         // It was committed in cfft order.
                         let evals = CircleEvaluations::from_cfft_order(
@@ -222,12 +195,21 @@ where
                         );
                         points_for_mat
                             .iter()
-                            .map(|&zeta| {
+                            .enumerate()
+                            .map(|(point_index, &zeta)| {
                                 let zeta = Point::from_projective_line(zeta);
                                 let ps_at_zeta =
                                     info_span!("compute opened values with Lagrange interpolation")
                                         .in_scope(|| evals.evaluate_at_point(zeta));
-                                challenger.observe_algebra_slice(&ps_at_zeta);
+                                transcript
+                                    .add_extensions::<Val, Challenge, FieldToFieldCodec<Val>>(
+                                        CircleLabelsDefault::opened_values(
+                                            batch_index,
+                                            matrix_index,
+                                            point_index,
+                                        ),
+                                        &ps_at_zeta,
+                                    );
                                 ps_at_zeta
                             })
                             .collect()
@@ -237,7 +219,11 @@ where
             .collect();
 
         // Batch combination challenge
-        let alpha: Challenge = challenger.sample_algebra_element();
+        let alpha = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::alpha(),
+            )
+            .into_inner();
 
         /*
         We are reducing columns ("ro" = reduced opening) with powers of alpha:
@@ -316,10 +302,28 @@ where
         // This is necessary because the first layer of folding uses different twiddles, so it's easiest
         // to do it here, before p3-fri.
 
+        let first_layer_dimensions = first_layer_mats
+            .iter()
+            .map(|matrix| matrix.dimensions())
+            .collect::<Vec<_>>()
+            .into();
         let (first_layer_commitment, first_layer_data) =
             self.fri_params.mmcs.commit(first_layer_mats);
-        challenger.observe(first_layer_commitment.clone());
-        let bivariate_beta: Challenge = challenger.sample_algebra_element();
+        self.fri_params.mmcs.write_commitment(
+            transcript,
+            CircleLabelsDefault::first_layer_commitment(),
+            first_layer_commitment,
+        );
+        let bivariate_beta = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::bivariate_beta(),
+            )
+            .into_inner();
+        transcript
+            .add_hints::<Challenge, ExtensionFieldCodec<Val, Challenge, FieldToFieldCodec<Val>>>(
+                CircleLabelsDefault::lambdas(),
+                &lambdas,
+            );
 
         // Fold all first layers at bivariate_beta.
 
@@ -333,122 +337,165 @@ where
             .rev()
             .collect();
 
-        let folding: CircleFriFoldingForMmcs<Val, Challenge, InputMmcs, FriMmcs> =
-            CircleFriFolding(PhantomData);
+        prove(
+            &CircleFriFolding,
+            &self.fri_params,
+            fri_input,
+            transcript,
+            |query, index, transcript| {
+                // CircleFriFolder asks for an extra query index bit, so we use that here to index
+                // the first layer fold.
 
-        let fri_proof = prove(&folding, &self.fri_params, fri_input, challenger, |index| {
-            // CircleFriFolder asks for an extra query index bit, so we use that here to index
-            // the first layer fold.
-
-            // Open the input (big opening, lots of columns) at the full index...
-            let input_openings = rounds
-                .iter()
-                .map(|(data, _)| {
+                // Open the input (big opening, lots of columns) at the full index...
+                for (batch, (data, _)) in rounds.iter().enumerate() {
                     let log_max_batch_height = log2_strict_usize(self.mmcs.get_max_height(data));
                     let reduced_index = index >> (log_max_height - log_max_batch_height);
-                    self.mmcs.open_batch(reduced_index, data)
-                })
-                .collect();
+                    let (opened_values, opening_proof) =
+                        self.mmcs.open_batch(reduced_index, data).unpack();
+                    let dimensions = self
+                        .mmcs
+                        .get_matrices(data)
+                        .iter()
+                        .map(|matrix| matrix.dimensions())
+                        .collect::<Vec<_>>();
+                    let batch_dimensions = BatchDimensions::from(dimensions.clone());
+                    assert_eq!(opened_values.len(), dimensions.len());
+                    for (matrix, (opened_values, dimensions)) in
+                        opened_values.iter().zip(dimensions.iter()).enumerate()
+                    {
+                        assert_eq!(opened_values.len(), dimensions.width);
+                        transcript.add_hints::<Val, FieldToFieldCodec<Val>>(
+                            CircleLabelsDefault::input_opened_values(query, batch, matrix),
+                            opened_values,
+                        );
+                    }
+                    self.mmcs.write_proof_hint(
+                        transcript,
+                        CircleLabelsDefault::input_opening_proof(query, batch),
+                        &batch_dimensions,
+                        opening_proof,
+                    );
+                }
 
-            // We committed to first_layer in pairs, so open the reduced index and include the sibling
-            // as part of the input proof.
-            let (first_layer_values, first_layer_proof) = self
-                .fri_params
-                .mmcs
-                .open_batch(index >> 1, &first_layer_data)
-                .unpack();
-            let first_layer_siblings = izip!(&first_layer_values, &log_heights)
-                .map(|(v, log_height)| {
-                    let reduced_index = index >> (log_max_height - log_height);
-                    let sibling_index = (reduced_index & 1) ^ 1;
-                    v[sibling_index]
-                })
-                .collect();
-            CircleInputProof {
-                input_openings,
-                first_layer_siblings,
-                first_layer_proof,
-            }
-        });
-
-        (
-            values,
-            CirclePcsProof {
-                first_layer_commitment,
-                lambdas,
-                fri_proof,
+                // We committed to first_layer in pairs, so open the reduced index and include the sibling
+                // as part of the input proof.
+                let (first_layer_values, first_layer_proof) = self
+                    .fri_params
+                    .mmcs
+                    .open_batch(index >> 1, &first_layer_data)
+                    .unpack();
+                let first_layer_siblings = izip!(&first_layer_values, &log_heights)
+                    .map(|(v, log_height)| {
+                        let reduced_index = index >> (log_max_height - log_height);
+                        let sibling_index = (reduced_index & 1) ^ 1;
+                        v[sibling_index]
+                    })
+                    .collect::<Vec<_>>();
+                transcript.add_hints::<
+                    Challenge,
+                    ExtensionFieldCodec<Val, Challenge, FieldToFieldCodec<Val>>,
+                >(
+                    CircleLabelsDefault::first_layer_sibling_values(query),
+                    &first_layer_siblings,
+                );
+                self.fri_params.mmcs.write_proof_hint(
+                    transcript,
+                    CircleLabelsDefault::first_layer_opening_proof(query),
+                    &first_layer_dimensions,
+                    first_layer_proof,
+                );
             },
-        )
+        );
     }
 
     fn verify(
         &self,
-        // For each round:
-        rounds: Vec<(
-            Self::Commitment,
-            // for each matrix:
-            Vec<(
-                // its domain,
-                Self::Domain,
-                // for each point:
-                Vec<(
-                    // the point,
-                    Challenge,
-                    // values at the point
-                    Vec<Challenge>,
-                )>,
-            )>,
-        )>,
-        proof: &Self::Proof,
-        challenger: &mut Challenger,
+        rounds: Vec<CommitmentWithOpeningPoints<Challenge, Self::Commitment, Self::Domain>>,
+        transcript: &mut VerifierState<'_, Challenger>,
     ) -> Result<(), Self::Error> {
-        // Write evaluations to challenger
-        for (_, round) in &rounds {
-            for (_, mat) in round {
-                for (_, point) in mat {
-                    challenger.observe_algebra_slice(point);
-                }
-            }
-        }
+        let batches = rounds
+            .iter()
+            .map(|(_, matrices)| BatchSpec::from_matrices(matrices))
+            .collect::<Vec<_>>();
 
-        // Batch combination challenge
-        let alpha: Challenge = challenger.sample_algebra_element();
-        challenger.observe(proof.first_layer_commitment.clone());
-        let bivariate_beta: Challenge = challenger.sample_algebra_element();
+        let protocol = CircleProtocol::new(
+            &self.fri_params,
+            batches,
+            CircleFriFolding::extra_query_index_bits(),
+        );
 
-        // +1 to account for first layer
-        let log_global_max_height =
-            proof.fri_proof.commit_phase_commits.len() + self.fri_params.log_blowup + 1;
-
-        let folding: CircleFriFoldingForMmcs<Val, Challenge, InputMmcs, FriMmcs> =
-            CircleFriFolding(PhantomData);
+        let alpha = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::alpha(),
+            )
+            .into_inner();
+        let first_layer_commitment = self
+            .fri_params
+            .mmcs
+            .read_commitment(
+                transcript,
+                CircleLabelsDefault::first_layer_commitment(),
+                &protocol.first_layer_dimensions,
+            )?
+            .into_inner();
+        let bivariate_beta = transcript
+            .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                CircleLabelsDefault::bivariate_beta(),
+            )
+            .into_inner();
+        let lambdas = transcript
+            .next_hints::<Challenge, ExtensionFieldCodec<Val, Challenge, FieldToFieldCodec<Val>>>(
+                CircleLabelsDefault::lambdas(),
+                protocol.first_layer_dimensions.len(),
+            )?;
 
         verify(
-            &folding,
+            &CircleFriFolding,
             &self.fri_params,
-            &proof.fri_proof,
-            challenger,
-            |index, input_proof| {
+            &protocol,
+            transcript,
+            |query, index, transcript| {
                 // log_height -> (alpha_offset, ro)
                 let mut reduced_openings = BTreeMap::new();
 
-                let CircleInputProof {
-                    input_openings,
-                    first_layer_siblings,
-                    first_layer_proof,
-                } = input_proof;
+                let input_openings = protocol
+                    .input_batch_dimensions
+                    .iter()
+                    .enumerate()
+                    .map(|(batch, dimensions)| {
+                        let opened_values = dimensions
+                            .iter()
+                            .enumerate()
+                            .map(|(matrix, dimensions)| {
+                                transcript.next_hints::<Val, FieldToFieldCodec<Val>>(
+                                    CircleLabelsDefault::input_opened_values(query, batch, matrix),
+                                    dimensions.width,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, TranscriptError>>()?;
+                        let opening_proof = self.mmcs.read_opening_proof(
+                            transcript,
+                            CircleLabelsDefault::input_opening_proof(query, batch),
+                            dimensions,
+                        )?;
+                        Ok(BatchOpening::new(opened_values, opening_proof))
+                    })
+                    .collect::<Result<Vec<_>, TranscriptError>>()?;
 
                 for (batch_opening, (batch_commit, mats)) in
-                    zip_eq(input_openings, &rounds, InputError::InputShapeError)?
+                    zip_eq(input_openings, &rounds, InputError::InputShapeError)
+                        .map_err(FriError::InputError)?
                 {
                     let batch_heights: Vec<usize> = mats
                         .iter()
                         .map(|(domain, _)| domain.size() << self.fri_params.log_blowup)
                         .collect_vec();
-                    let batch_dims: Vec<Dimensions> = batch_heights
+                    let batch_dims: Vec<Dimensions> = mats
                         .iter()
-                        // todo: mmcs doesn't really need width
-                        .map(|&height| Dimensions { width: 0, height })
+                        .map(|(domain, points)| Dimensions {
+                            width: points.first().map(|(_, values)| values.len()).unwrap_or(0),
+                            height: domain.size() << self.fri_params.log_blowup,
+                        })
                         .collect_vec();
 
                     let (dims, idx) = batch_heights
@@ -462,22 +509,24 @@ where
                             |log_batch_max_height| {
                                 (
                                     &batch_dims[..],
-                                    index >> (log_global_max_height - log_batch_max_height),
+                                    index >> (protocol.query_bits() - log_batch_max_height),
                                 )
                             },
                         );
 
                     self.mmcs
-                        .verify_batch(batch_commit, dims, idx, batch_opening.into())
-                        .map_err(InputError::InputMmcsError)?;
+                        .verify_batch(batch_commit, dims, idx, (&batch_opening).into())
+                        .map_err(|err| FriError::InputError(InputError::InputMmcsError(err)))?;
 
                     for (ps_at_x, (mat_domain, mat_points_and_values)) in zip_eq(
                         &batch_opening.opened_values,
                         mats,
                         InputError::InputShapeError,
-                    )? {
+                    )
+                    .map_err(FriError::InputError)?
+                    {
                         let log_height = mat_domain.log_n + self.fri_params.log_blowup;
-                        let bits_reduced = log_global_max_height - log_height;
+                        let bits_reduced = protocol.query_bits() - log_height;
                         let orig_idx = cfft_permute_index(index >> bits_reduced, log_height);
 
                         let committed_domain = CircleDomain::standard(log_height);
@@ -500,21 +549,36 @@ where
                 }
 
                 // Verify bivariate fold and lambda correction
+                let first_layer_siblings = transcript.next_hints::<Challenge, ExtensionFieldCodec<
+                    Val,
+                    Challenge,
+                    FieldToFieldCodec<Val>,
+                >>(
+                    CircleLabelsDefault::first_layer_sibling_values(query),
+                    protocol.first_layer_dimensions.len(),
+                )?;
+                let first_layer_proof = self.fri_params.mmcs.read_opening_proof(
+                    transcript,
+                    CircleLabelsDefault::first_layer_opening_proof(query),
+                    &protocol.first_layer_dimensions,
+                )?;
 
                 let (mut fri_input, fl_dims, fl_leaves): (Vec<_>, Vec<_>, Vec<_>) = zip_eq(
                     zip_eq(
                         reduced_openings,
                         first_layer_siblings,
                         InputError::InputShapeError,
-                    )?,
-                    &proof.lambdas,
+                    )
+                    .map_err(FriError::InputError)?,
+                    &lambdas,
                     InputError::InputShapeError,
-                )?
-                .map(|(((log_height, (_, ro)), &fl_sib), &lambda)| {
+                )
+                .map_err(FriError::InputError)?
+                .map(|(((log_height, (_, ro)), fl_sib), &lambda)| {
                     assert!(log_height > 0);
 
                     let orig_size = log_height - self.fri_params.log_blowup;
-                    let bits_reduced = log_global_max_height - log_height;
+                    let bits_reduced = protocol.query_bits() - log_height;
                     let orig_idx = cfft_permute_index(index >> bits_reduced, log_height);
 
                     let lde_domain = CircleDomain::standard(log_height);
@@ -552,12 +616,12 @@ where
                 self.fri_params
                     .mmcs
                     .verify_batch(
-                        &proof.first_layer_commitment,
+                        &first_layer_commitment,
                         &fl_dims,
                         index >> 1,
-                        BatchOpeningRef::new(&fl_leaves, first_layer_proof),
+                        BatchOpeningRef::new(&fl_leaves, &first_layer_proof),
                     )
-                    .map_err(InputError::FirstLayerMmcsError)?;
+                    .map_err(|err| FriError::InputError(InputError::FirstLayerMmcsError(err)))?;
 
                 Ok(fri_input)
             },
@@ -583,300 +647,5 @@ where
     {
         let table = build_periodic_lde_table_circle(periodic_cols, &trace_domain, &quotient_domain);
         Some(table)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use p3_challenger::{HashChallenger, SerializingChallenger32};
-    use p3_commit::ExtensionMmcs;
-    use p3_field::extension::BinomialExtensionField;
-    use p3_fri::FriParameters;
-    use p3_fri::verifier::FriError;
-    use p3_keccak::Keccak256Hash;
-    use p3_merkle_tree::MerkleTreeMmcs;
-    use p3_mersenne_31::Mersenne31;
-    use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
-    use rand::rngs::SmallRng;
-    use rand::{RngExt, SeedableRng};
-
-    use super::*;
-
-    type Val = Mersenne31;
-    type Challenge = BinomialExtensionField<Mersenne31, 3>;
-    type ByteHash = Keccak256Hash;
-    type FieldHash = SerializingHasher<ByteHash>;
-    type MyCompress = CompressionFunctionFromHasher<ByteHash, 2, 32>;
-    type ValMmcs = MerkleTreeMmcs<Val, u8, FieldHash, MyCompress, 2, 32>;
-    type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
-    type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
-    type TestPcs = CirclePcs<Val, ValMmcs, ChallengeMmcs>;
-    type TestError = FriError<
-        <ChallengeMmcs as Mmcs<Challenge>>::Error,
-        InputError<<ValMmcs as Mmcs<Val>>::Error, <ChallengeMmcs as Mmcs<Challenge>>::Error>,
-    >;
-
-    /// Build a valid Circle PCS proof for a random single-column trace.
-    ///
-    /// Returns all the pieces needed to verify (or re-verify after mutation):
-    /// the PCS instance, hasher seed, commitment, domain, evaluation point,
-    /// opened values, and the proof itself.
-    ///
-    /// # Fixture parameters
-    ///
-    /// - Trace: 2^{10} = 1024 rows, 1 column of random field elements.
-    /// - FRI: testing parameters with log_blowup = 2, log_final_poly_len = 0.
-    /// - Hash: Keccak-256 with a binary Merkle tree.
-    #[allow(clippy::type_complexity)]
-    fn setup_valid_proof() -> (
-        TestPcs,
-        ByteHash,
-        <ValMmcs as Mmcs<Val>>::Commitment,
-        CircleDomain<Val>,
-        Challenge,
-        Vec<Vec<Vec<Vec<Challenge>>>>,
-        CirclePcsProof<Val, Challenge, ValMmcs, ChallengeMmcs, Val>,
-    ) {
-        let mut rng = SmallRng::seed_from_u64(0);
-
-        // Build the hash stack: field hasher → compression → Merkle tree.
-        let byte_hash = ByteHash {};
-        let field_hash = FieldHash::new(byte_hash);
-        let compress = MyCompress::new(byte_hash);
-        let val_mmcs = ValMmcs::new(field_hash, compress, 0);
-
-        // Wrap the value-domain Merkle tree for extension-field leaves.
-        let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
-
-        // Minimal FRI parameters for fast test execution.
-        let fri_params = FriParameters::new_testing(challenge_mmcs, 0);
-
-        let pcs = TestPcs {
-            mmcs: val_mmcs,
-            fri_params,
-            _phantom: PhantomData,
-        };
-
-        // Generate a random trace on a circle domain of size 2^{10}.
-        let log_n = 10;
-        let d =
-            <TestPcs as Pcs<Challenge, Challenger>>::natural_domain_for_degree(&pcs, 1 << log_n);
-
-        let evals = RowMajorMatrix::rand(&mut rng, 1 << log_n, 1);
-
-        // Commit to the trace and produce the Merkle root.
-        let (comm, data) = <TestPcs as Pcs<Challenge, Challenger>>::commit(&pcs, [(d, evals)]);
-
-        // Random evaluation point in the extension field.
-        let zeta: Challenge = rng.random();
-
-        // Generate the opening proof at the chosen evaluation point.
-        let mut chal = Challenger::from_hasher(vec![], byte_hash);
-        let (values, proof) = pcs.open(vec![(&data, vec![vec![zeta]])], &mut chal);
-
-        (pcs, byte_hash, comm, d, zeta, values, proof)
-    }
-
-    /// Run the PCS verifier with the given proof and return the result.
-    ///
-    /// This is a thin wrapper that reconstructs a fresh challenger and
-    /// calls the verification routine. Tests use it to verify both valid
-    /// proofs and intentionally malformed ones.
-    fn try_verify(
-        pcs: &TestPcs,
-        byte_hash: ByteHash,
-        comm: &<ValMmcs as Mmcs<Val>>::Commitment,
-        d: CircleDomain<Val>,
-        zeta: Challenge,
-        values: &[Vec<Vec<Vec<Challenge>>>],
-        proof: &CirclePcsProof<Val, Challenge, ValMmcs, ChallengeMmcs, Val>,
-    ) -> Result<(), TestError> {
-        // Build a fresh challenger from the same seed so the transcript
-        // replays identically to what the prover produced.
-        let mut chal = Challenger::from_hasher(vec![], byte_hash);
-        pcs.verify(
-            vec![(
-                comm.clone(),
-                vec![(d, vec![(zeta, values[0][0][0].clone())])],
-            )],
-            proof,
-            &mut chal,
-        )
-    }
-
-    #[test]
-    fn circle_pcs() {
-        // Smoke test: an honestly generated proof must verify successfully.
-        let (pcs, byte_hash, comm, d, zeta, values, proof) = setup_valid_proof();
-        try_verify(&pcs, byte_hash, &comm, d, zeta, &values, &proof).expect("verify err");
-    }
-
-    #[test]
-    fn reject_query_proof_count_mismatch() {
-        // Invariant: the proof must contain exactly num_queries query proofs.
-        // The verifier rejects if the count is wrong.
-        let (pcs, byte_hash, comm, d, zeta, values, mut proof) = setup_valid_proof();
-
-        // Mutation: remove one query proof so the count falls short.
-        //
-        //     before: query_proofs = [q_0, q_1, ..., q_{n-1}]   (n = num_queries)
-        //     after:  query_proofs = [q_0, q_1, ..., q_{n-2}]   (n - 1)
-        //     → expected n, got n - 1 → error
-        proof.fri_proof.query_proofs.pop();
-
-        let err = try_verify(&pcs, byte_hash, &comm, d, zeta, &values, &proof)
-            .expect_err("expected QueryProofCountMismatch");
-
-        // Destructure for precise field assertions (better diagnostics than matches!).
-        let FriError::QueryProofCountMismatch { expected, got } = err else {
-            panic!("expected QueryProofCountMismatch, got {err:?}");
-        };
-        assert_eq!(expected, pcs.fri_params.num_queries);
-        assert_eq!(got, pcs.fri_params.num_queries - 1);
-    }
-
-    #[test]
-    fn reject_query_commit_phase_openings_count_mismatch() {
-        // Invariant: each query proof must carry exactly one opening per
-        // commit-phase round. If a query has fewer (or more) openings than
-        // there are commitments, the proof shape is invalid.
-        let (pcs, byte_hash, comm, d, zeta, values, proof) = setup_valid_proof();
-
-        // We need the original proof to assert against its commitment count,
-        // so clone before mutating.
-        let mut bad = proof.clone();
-
-        // Mutation: remove the last opening from query 0.
-        //
-        //     commit_phase_commits:                [c_0, ..., c_{n-1}]   (n rounds)
-        //     query 0 commit_phase_openings:       [o_0, ..., o_{n-2}]   (n - 1 after pop)
-        //     → n != n - 1 → error on query 0
-        bad.fri_proof.query_proofs[0].commit_phase_openings.pop();
-
-        let err = try_verify(&pcs, byte_hash, &comm, d, zeta, &values, &bad)
-            .expect_err("expected QueryCommitPhaseOpeningsCountMismatch");
-
-        let FriError::QueryCommitPhaseOpeningsCountMismatch {
-            query,
-            expected,
-            got,
-        } = err
-        else {
-            panic!("expected QueryCommitPhaseOpeningsCountMismatch, got {err:?}");
-        };
-        // Error must identify query 0 as the offender.
-        assert_eq!(query, 0);
-        assert_eq!(expected, proof.fri_proof.commit_phase_commits.len());
-        assert_eq!(got, expected - 1);
-    }
-
-    #[test]
-    fn reject_sibling_values_length_mismatch() {
-        // Invariant: in each folding round with arity k, the prover must
-        // supply exactly k - 1 sibling values (the queried evaluation is
-        // the remaining one).
-        let (pcs, byte_hash, comm, d, zeta, values, mut proof) = setup_valid_proof();
-
-        // Capture the original sibling count and arity before mutating.
-        let log_arity = proof.fri_proof.query_proofs[0].commit_phase_openings[0].log_arity as usize;
-        let arity = 1usize << log_arity;
-        let original_sibling_count = proof.fri_proof.query_proofs[0].commit_phase_openings[0]
-            .sibling_values
-            .len();
-
-        // Mutation: remove one sibling value from query 0, round 0.
-        //
-        //     arity = 2^{log_arity}, expected siblings = arity - 1
-        //     before: sibling_values = [s_0, ..., s_{arity-2}]   (arity - 1 elements)
-        //     after:  sibling_values = [s_0, ..., s_{arity-3}]   (arity - 2 elements)
-        //     → expected arity - 1, got arity - 2 → error at round 0
-        proof.fri_proof.query_proofs[0].commit_phase_openings[0]
-            .sibling_values
-            .pop();
-
-        let err = try_verify(&pcs, byte_hash, &comm, d, zeta, &values, &proof)
-            .expect_err("expected SiblingValuesLengthMismatch");
-
-        let FriError::SiblingValuesLengthMismatch {
-            round,
-            expected,
-            got,
-        } = err
-        else {
-            panic!("expected SiblingValuesLengthMismatch, got {err:?}");
-        };
-        // Error must identify round 0 as the offender.
-        assert_eq!(round, 0);
-        // The verifier expects (arity - 1) siblings per folding group.
-        assert_eq!(expected, arity - 1);
-        // We popped one, so one fewer than the original count.
-        assert_eq!(got, original_sibling_count - 1);
-    }
-
-    // Two error variants cannot be triggered through the PCS verification
-    // layer because Merkle commitment checks or input-proof validation
-    // fail first for any proof mutation that would reach those code paths:
-    //
-    // - Final fold height mismatch: requires the total folding to stop at
-    //   the wrong domain size, but altering round counts also invalidates
-    //   Merkle proofs.
-    // - Unconsumed reduced openings: requires leftover polynomial data
-    //   after folding completes, but input-proof checks reject the shape
-    //   before the folding loop runs.
-    //
-    // Both are reachable by a malicious prover who crafts openings that
-    // pass Merkle checks but have wrong structure — they serve as defense
-    // in depth in the low-level verifier.
-
-    #[test]
-    fn reject_query_log_arities_mismatch() {
-        // Invariant: all query proofs must use the same per-round folding
-        // arity schedule. The verifier takes the first query proof's
-        // schedule as a reference and rejects any that differ.
-        let (pcs, byte_hash, comm, d, zeta, values, mut proof) = setup_valid_proof();
-
-        // This check compares query 1 against query 0, so we need at least
-        // two query proofs. With testing parameters this is always true, but
-        // guard defensively.
-        if proof.fri_proof.query_proofs.len() < 2 {
-            return;
-        }
-
-        // Capture the reference arity schedule from query 0 before mutating.
-        let reference_arities: Vec<usize> = proof.fri_proof.query_proofs[0]
-            .commit_phase_openings
-            .iter()
-            .map(|o| o.log_arity as usize)
-            .collect();
-
-        // Mutation: bump the log_arity of query 1's first round by 1.
-        //
-        //     query 0 arities: [a_0, a_1, ..., a_{n-1}]       (reference)
-        //     query 1 arities: [a_0 + 1, a_1, ..., a_{n-1}]   (corrupted)
-        //     → schedules differ → error on query 1
-        let original = proof.fri_proof.query_proofs[1].commit_phase_openings[0].log_arity;
-        proof.fri_proof.query_proofs[1].commit_phase_openings[0].log_arity = original + 1;
-
-        // Build the expected corrupted schedule for query 1.
-        let mut corrupted_arities = reference_arities.clone();
-        corrupted_arities[0] = original as usize + 1;
-
-        let err = try_verify(&pcs, byte_hash, &comm, d, zeta, &values, &proof)
-            .expect_err("expected QueryLogAritiesMismatch");
-
-        let FriError::QueryLogAritiesMismatch {
-            query,
-            expected,
-            got,
-        } = err
-        else {
-            panic!("expected QueryLogAritiesMismatch, got {err:?}");
-        };
-        // Error must identify query 1 (the first one compared against the reference).
-        assert_eq!(query, 1);
-        // The expected schedule is query 0's (the reference).
-        assert_eq!(expected, reference_arities);
-        // The got schedule is query 1's corrupted version.
-        assert_eq!(got, corrupted_arities);
     }
 }

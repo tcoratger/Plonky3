@@ -70,6 +70,8 @@ pub enum Length {
     Scalar,
     /// A statically-known number of values.
     Fixed(usize),
+    /// A statically-known number of sampled challenge bits.
+    Bits(usize),
     /// A dynamically-known number of values.
     Dynamic,
 }
@@ -220,6 +222,7 @@ impl Display for Length {
             Self::None => write!(f, "None"),
             Self::Scalar => write!(f, "Scalar"),
             Self::Fixed(n) => write!(f, "Fixed({n})"),
+            Self::Bits(n) => write!(f, "Bits({n})"),
             Self::Dynamic => write!(f, "Dynamic"),
         }
     }

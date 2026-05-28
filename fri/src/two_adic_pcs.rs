@@ -16,18 +16,17 @@
 use alloc::borrow::Cow;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt::Debug;
 use core::marker::PhantomData;
 
 use itertools::{Itertools, izip};
-use p3_challenger::{CanObserve, FieldChallenger, GrindingChallenger};
-use p3_commit::{
-    BatchOpening, BuildPeriodicLdeTableFast, Mmcs, OpenedValues, Pcs, PeriodicLdeTable,
-};
+use p3_challenger::fs::{DefaultCodec, FieldToFieldCodec, ProverState, VerifierState};
+use p3_challenger::{FieldChallenger, GrindingChallenger};
+use p3_commit::{BuildPeriodicLdeTableFast, MmcsReader, MmcsWriter, Pcs, PeriodicLdeTable};
 use p3_dft::TwoAdicSubgroupDft;
 use p3_field::coset::TwoAdicMultiplicativeCoset;
 use p3_field::{
-    ExtensionField, PackedFieldExtension, TwoAdicField, batch_multiplicative_inverse, dot_product,
+    ExtensionField, PackedFieldExtension, PrimeField, TwoAdicField, batch_multiplicative_inverse,
+    dot_product,
 };
 use p3_matrix::Matrix;
 use p3_matrix::bitrev::{BitReversedMatrixView, BitReversibleMatrix};
@@ -39,8 +38,9 @@ use p3_util::{log2_strict_usize, reverse_bits_len, reverse_slice_index_bits};
 use tracing::{debug_span, instrument};
 
 use crate::periodic::build_periodic_lde_table_two_adic;
-use crate::verifier::{self, FriError};
-use crate::{FriFoldingStrategy, FriParameters, FriProof, prover};
+use crate::protocol::{FriLabels, FriLabelsDefault};
+use crate::verifier::FriError;
+use crate::{FriFoldingStrategy, FriParameters, prover};
 
 /// A polynomial commitment scheme using FRI to generate opening proofs.
 ///
@@ -64,6 +64,18 @@ impl<Val, Dft, InputMmcs, FriMmcs> TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs> {
             fri,
             _phantom: PhantomData,
         }
+    }
+
+    pub fn params(&self) -> &FriParameters<FriMmcs> {
+        &self.fri
+    }
+
+    pub fn input_mmcs(&self) -> &InputMmcs {
+        &self.mmcs
+    }
+
+    pub fn fri_mmcs(&self) -> &FriMmcs {
+        &self.fri.mmcs
     }
 }
 
@@ -92,19 +104,17 @@ pub type CommitmentWithOpeningPoints<Challenge, Commitment, Domain> = (
     )>,
 );
 
-pub struct TwoAdicFriFolding<InputProof, InputError>(pub PhantomData<(InputProof, InputError)>);
+pub struct TwoAdicFriFolding;
 
-pub type TwoAdicFriFoldingForMmcs<F, M> =
-    TwoAdicFriFolding<Vec<BatchOpening<F, M>>, <M as Mmcs<F>>::Error>;
-
-impl<F: TwoAdicField, InputProof: Sync, InputError: Debug + Sync, EF: ExtensionField<F>>
-    FriFoldingStrategy<F, EF> for TwoAdicFriFolding<InputProof, InputError>
-{
-    type InputProof = InputProof;
-    type InputError = InputError;
-
-    fn extra_query_index_bits(&self) -> usize {
+impl TwoAdicFriFolding {
+    pub const fn extra_query_index_bits() -> usize {
         0
+    }
+}
+
+impl<F: TwoAdicField, EF: ExtensionField<F>> FriFoldingStrategy<F, EF> for TwoAdicFriFolding {
+    fn extra_query_index_bits(&self) -> usize {
+        Self::extra_query_index_bits()
     }
 
     fn fold_row(
@@ -263,19 +273,20 @@ fn lagrange_interpolate_at<F: TwoAdicField, EF: ExtensionField<F>>(
 impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challenger>
     for TwoAdicFriPcs<Val, Dft, InputMmcs, FriMmcs>
 where
-    Val: TwoAdicField,
+    Val: TwoAdicField + PrimeField,
     Dft: TwoAdicSubgroupDft<Val>,
-    InputMmcs: Mmcs<Val, Proof: Sync, Error: Sync>,
-    FriMmcs: Mmcs<Challenge>,
+    InputMmcs: MmcsWriter<Val> + MmcsReader<Val, Proof: Sync, Error: Sync>,
+    FriMmcs: MmcsWriter<Challenge> + MmcsReader<Challenge>,
     Challenge: ExtensionField<Val>,
-    Challenger:
-        FieldChallenger<Val> + CanObserve<FriMmcs::Commitment> + GrindingChallenger<Witness = Val>,
+    Challenger: FieldChallenger<Val>
+        + GrindingChallenger<Witness = Val>
+        + DefaultCodec<InputMmcs::Digest>
+        + DefaultCodec<FriMmcs::Digest>,
 {
     type Domain = TwoAdicMultiplicativeCoset<Val>;
     type Commitment = InputMmcs::Commitment;
     type ProverData = InputMmcs::ProverData<RowMajorMatrix<Val>>;
     type EvaluationsOnDomain<'a> = BitReversedMatrixView<RowMajorMatrixCow<'a, Val>>;
-    type Proof = FriProof<Challenge, FriMmcs, Val, Vec<BatchOpening<Val, InputMmcs>>>;
     type Error = FriError<FriMmcs::Error, InputMmcs::Error>;
     const ZK: bool = false;
 
@@ -399,17 +410,11 @@ where
     fn open(
         &self,
         // For each multi-matrix commitment,
-        commitment_data_with_opening_points: Vec<(
-            // The matrices and auxiliary prover data
-            &Self::ProverData,
-            // for each matrix,
-            Vec<
-                // points to open
-                Vec<Challenge>,
-            >,
-        )>,
-        challenger: &mut Challenger,
-    ) -> (OpenedValues<Challenge>, Self::Proof) {
+        commitment_data_with_opening_points: Vec<
+            ProverDataWithOpeningPoints<'_, Challenge, Self::ProverData>,
+        >,
+        transcript: &mut ProverState<Challenger>,
+    ) {
         /*
 
         A quick rundown of the optimizations in this function:
@@ -501,10 +506,12 @@ where
         // Evaluate coset representations and write openings to the challenger
         let all_opened_values = mats_and_points
             .iter()
-            .map(|(mats, points)| {
+            .enumerate()
+            .map(|(batch_index, (mats, points))| {
                 // For each collection of matrices
                 izip!(mats.iter(), points.iter())
-                    .map(|(mat, points_for_mat)| {
+                    .enumerate()
+                    .map(|(matrix_index, (mat, points_for_mat))| {
                         // TODO: This assumes that every input matrix has a blowup of at least self.fri.log_blowup.
                         // If the blow_up factor is smaller than self.fri.log_blowup, this will lead to errors.
                         // If it is bigger, we shouldn't get any errors but it will be slightly slower.
@@ -520,7 +527,8 @@ where
 
                         points_for_mat
                             .iter()
-                            .map(|&point| {
+                            .enumerate()
+                            .map(|(point_index, &point)| {
                                 let _guard =
                                     debug_span!("evaluate matrix", dims = %mat.dimensions())
                                         .entered();
@@ -540,7 +548,15 @@ where
                                     )
                                 });
 
-                                challenger.observe_algebra_slice(&ys);
+                                transcript
+                                    .add_extensions::<Val, Challenge, FieldToFieldCodec<Val>>(
+                                        FriLabelsDefault::opened_values(
+                                            batch_index,
+                                            matrix_index,
+                                            point_index,
+                                        ),
+                                        &ys,
+                                    );
                                 ys
                             })
                             .collect_vec()
@@ -558,7 +574,12 @@ where
         // points it needs to be opened at. This comes from the fact that we are taking a large linear combination
         // of `(f(zeta) - f(x))/(zeta - x)` for each function `f` and all of `f`'s opening points.
         // In our setup, k is two times the trace width plus the number of quotient polynomials.
-        let alpha: Challenge = challenger.sample_algebra_element();
+        let alpha =
+            transcript
+                .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                    FriLabelsDefault::alpha(),
+                )
+                .into_inner();
 
         // We precompute powers of alpha as we need the same powers for each matrix.
         // We compute both a vector of unpacked powers and a vector of packed powers.
@@ -654,20 +675,16 @@ where
         // low degree functions.
         let fri_input = reduced_openings.into_iter().rev().flatten().collect_vec();
 
-        let folding: TwoAdicFriFoldingForMmcs<Val, InputMmcs> = TwoAdicFriFolding(PhantomData);
-
         // Produce the FRI proof.
-        let fri_proof = prover::prove_fri(
-            &folding,
+        prover::prove_fri::<_, _, _, _, _, _>(
+            &TwoAdicFriFolding,
             &self.fri,
             fri_input,
-            challenger,
+            transcript,
             log_global_max_height,
             &commitment_data_with_opening_points,
             &self.mmcs,
         );
-
-        (all_opened_values, fri_proof)
     }
 
     fn verify(
@@ -676,26 +693,20 @@ where
         commitments_with_opening_points: Vec<
             CommitmentWithOpeningPoints<Challenge, Self::Commitment, Self::Domain>,
         >,
-        proof: &Self::Proof,
-        challenger: &mut Challenger,
+        transcript: &mut VerifierState<'_, Challenger>,
     ) -> Result<(), Self::Error> {
-        // Write all evaluations to challenger.
-        // Need to ensure to do this in the same order as the prover.
-        for (_, round) in &commitments_with_opening_points {
-            for (_, mat) in round {
-                for (_, point) in mat {
-                    challenger.observe_algebra_slice(point);
-                }
-            }
-        }
+        let alpha =
+            transcript
+                .challenge_extension::<Val, Challenge, FieldToFieldCodec<Val>>(
+                    FriLabelsDefault::alpha(),
+                )
+                .into_inner();
 
-        let folding: TwoAdicFriFoldingForMmcs<Val, InputMmcs> = TwoAdicFriFolding(PhantomData);
-
-        verifier::verify_fri(
-            &folding,
+        crate::verifier::verify_fri::<_, _, _, _, _, _>(
+            &TwoAdicFriFolding,
             &self.fri,
-            proof,
-            challenger,
+            transcript,
+            alpha,
             &commitments_with_opening_points,
             &self.mmcs,
         )?;

@@ -1,11 +1,88 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Debug;
+use core::ops::Deref;
 
+use p3_challenger::fs::{
+    DefaultCodec, Interaction, Label, ProverState, TranscriptBound, TranscriptError, VerifierState,
+};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::{Dimensions, Matrix};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// Matrix dimensions for one MMCS commitment batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchDimensions(Vec<Dimensions>);
+
+impl BatchDimensions {
+    /// Build batch dimensions from matrix dimensions in commitment order.
+    #[must_use]
+    pub const fn new(dimensions: Vec<Dimensions>) -> Self {
+        Self(dimensions)
+    }
+
+    /// Build batch dimensions for a batch containing one matrix.
+    #[must_use]
+    pub fn single(dimensions: Dimensions) -> Self {
+        Self(vec![dimensions])
+    }
+
+    /// Borrow the matrix dimensions in commitment order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Dimensions] {
+        &self.0
+    }
+
+    /// Number of matrices in the batch.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the batch is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterate over the matrix dimensions in commitment order.
+    pub fn iter(&self) -> core::slice::Iter<'_, Dimensions> {
+        self.0.iter()
+    }
+
+    /// Number of values in a complete batch opening row set.
+    #[must_use]
+    pub fn opened_values_len(&self) -> usize {
+        self.iter().map(|dims| dims.width).sum()
+    }
+}
+
+impl From<Vec<Dimensions>> for BatchDimensions {
+    fn from(dimensions: Vec<Dimensions>) -> Self {
+        Self::new(dimensions)
+    }
+}
+
+impl<const N: usize> From<[Dimensions; N]> for BatchDimensions {
+    fn from(dimensions: [Dimensions; N]) -> Self {
+        Self::new(dimensions.into())
+    }
+}
+
+impl AsRef<[Dimensions]> for BatchDimensions {
+    fn as_ref(&self) -> &[Dimensions] {
+        self.as_slice()
+    }
+}
+
+impl Deref for BatchDimensions {
+    type Target = [Dimensions];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
 /// A "Mixed Matrix Commitment Scheme" (MMCS) is a generalization of a vector commitment scheme.
 ///
@@ -149,6 +226,76 @@ pub trait Mmcs<T: Send + Sync + Clone>: Clone {
         index: usize,
         batch_opening: BatchOpeningRef<'_, T, Self>,
     ) -> Result<(), Self::Error>;
+}
+
+/// Transcript I/O extension for MMCS implementations.
+///
+/// This is separate from [`Mmcs`] because commitments and opening proofs do not have
+/// a universal canonical transcript representation.
+pub trait MmcsTranscript<T: Send + Sync + Clone>: Mmcs<T> + Sized {
+    /// Words used inside commitments and Merkle proofs.
+    type Digest: Send + Sync + Clone;
+
+    /// Append the transcript endpoint used to carry a commitment.
+    fn append_commitment(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    );
+
+    /// Append the transcript endpoint used to carry only an opening proof hint.
+    fn append_opening_proof_hint(
+        &self,
+        interactions: &mut Vec<Interaction>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    );
+}
+
+/// Prover-side transcript writing extension for MMCS implementations.
+pub trait MmcsWriter<T: Send + Sync + Clone>: MmcsTranscript<T> {
+    /// Write a commitment into the transcript.
+    fn write_commitment<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        label: Label,
+        commitment: Self::Commitment,
+    ) where
+        Ch: DefaultCodec<Self::Digest>;
+
+    /// Write only an opening proof as non-absorbed proof data.
+    fn write_proof_hint<Ch>(
+        &self,
+        transcript: &mut ProverState<Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+        opening_proof: Self::Proof,
+    ) where
+        Ch: DefaultCodec<Self::Digest>;
+}
+
+/// Verifier-side transcript reading extension for MMCS implementations.
+pub trait MmcsReader<T: Send + Sync + Clone>: MmcsTranscript<T> {
+    /// Read a commitment from the transcript.
+    fn read_commitment<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<TranscriptBound<Self::Commitment>, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>;
+
+    /// Read only a non-absorbed opening proof.
+    fn read_opening_proof<'a, Ch>(
+        &self,
+        transcript: &mut VerifierState<'a, Ch>,
+        opening_proof_label: Label,
+        dimensions: &BatchDimensions,
+    ) -> Result<Self::Proof, TranscriptError>
+    where
+        Ch: DefaultCodec<Self::Digest>;
 }
 
 /// A Batched opening proof.
