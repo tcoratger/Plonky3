@@ -5,7 +5,7 @@ use core::ops::Deref;
 use p3_challenger::fs::{
     DefaultCodec, Interaction, Label, ProverState, TranscriptBound, TranscriptError, VerifierState,
 };
-use p3_field::{ExtensionField, Field, PrimeField};
+use p3_field::{ExtensionField, Field};
 use p3_matrix::extension::FlatMatrixView;
 use p3_matrix::{Dimensions, Matrix};
 
@@ -57,7 +57,7 @@ where
 
 impl<F, EF, InnerMmcs> MmcsWriter<EF> for ExtensionMmcs<F, EF, InnerMmcs>
 where
-    F: PrimeField,
+    F: Field,
     EF: ExtensionField<F>,
     InnerMmcs: MmcsWriter<F>,
 {
@@ -88,7 +88,7 @@ where
 
 impl<F, EF, InnerMmcs> MmcsReader<EF> for ExtensionMmcs<F, EF, InnerMmcs>
 where
-    F: PrimeField,
+    F: Field,
     EF: ExtensionField<F>,
     InnerMmcs: MmcsReader<F>,
 {

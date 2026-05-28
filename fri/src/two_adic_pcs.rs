@@ -275,7 +275,7 @@ impl<Val, Dft, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challen
 where
     Val: TwoAdicField + PrimeField,
     Dft: TwoAdicSubgroupDft<Val>,
-    InputMmcs: MmcsWriter<Val> + MmcsReader<Val, Proof: Sync, Error: Sync>,
+    InputMmcs: MmcsWriter<Val> + MmcsReader<Val>,
     FriMmcs: MmcsWriter<Challenge> + MmcsReader<Challenge>,
     Challenge: ExtensionField<Val>,
     Challenger: FieldChallenger<Val>

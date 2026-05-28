@@ -361,18 +361,6 @@ mod two_adic {
     }
 
     #[test]
-    fn tampered_log_arities_hits_protocol_shape() {
-        let (pcs, protocol, ds, proof) = minimal_proof();
-        let proof = tamper_field_at_label(&ds, Labels::log_arities(), &proof);
-        let err = verifier(&pcs, &protocol, proof).expect_err("tampered log arities should fail");
-
-        match err {
-            FriError::ProtocolShape => {}
-            other => panic!("wrong error variant: {other:?}"),
-        }
-    }
-
-    #[test]
     fn tampered_input_opening_proof_hits_input_error() {
         let (pcs, protocol, ds, proof) = minimal_proof();
         let proof = tamper_field_at_label(&ds, Labels::input_opening_proof(0, 0), &proof);

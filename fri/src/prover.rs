@@ -172,7 +172,6 @@ where
     let mut inputs_iter = inputs.into_iter().peekable();
     let mut folded = inputs_iter.next().unwrap();
     let mut data = vec![];
-    let mut log_arities = vec![];
 
     let log_final_height = params.log_blowup + params.log_final_poly_len;
 
@@ -189,7 +188,6 @@ where
             params.max_log_arity,
         );
         let arity = 1 << log_arity;
-        log_arities.push(log_arity);
 
         // As folded is in bit reversed order, the evaluations at conjugate points are adjacent.
         // We reinterpret the vector as a matrix of width `arity`.
@@ -248,17 +246,6 @@ where
     transcript.add_extensions::<Val, Challenge, FieldToFieldCodec<Val>>(
         FriLabelsDefault::final_poly(),
         &final_poly,
-    );
-
-    // Bind the chosen folding arities into the transcript.
-    let log_arity_values = log_arities
-        .iter()
-        .map(|&log_arity| Val::from_usize(log_arity))
-        .collect::<Vec<_>>();
-
-    transcript.add_scalars::<Val, FieldToFieldCodec<Val>>(
-        FriLabelsDefault::log_arities(),
-        &log_arity_values,
     );
 
     data

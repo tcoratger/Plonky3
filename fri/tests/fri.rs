@@ -72,15 +72,15 @@ fn challenger() -> Challenger {
 fn input_mmcs() -> ValMmcs {
     let perm = perm();
     let hash = MyHash::new(perm.clone());
-    let compress = MyCompress::new(perm.clone());
+    let compress = MyCompress::new(perm);
     ValMmcs::new(hash.clone(), compress.clone(), 0)
 }
 
 fn fri_mmcs() -> ChallengeMmcs {
     let perm = perm();
     let hash = MyHash::new(perm.clone());
-    let compress = MyCompress::new(perm.clone());
-    ChallengeMmcs::new(ValMmcs::new(hash.clone(), compress.clone(), 0))
+    let compress = MyCompress::new(perm);
+    ChallengeMmcs::new(ValMmcs::new(hash, compress, 0))
 }
 
 fn rand_matrix<R: RngExt>(

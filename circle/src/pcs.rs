@@ -15,6 +15,7 @@ use p3_commit::{
 };
 use p3_field::extension::ComplexExtendable;
 use p3_field::{ExtensionField, Field, PrimeField};
+use p3_fri::protocol::Protocol;
 use p3_fri::verifier::FriError;
 use p3_fri::{CommitmentWithOpeningPoints, FriParameters};
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixCow};
@@ -74,7 +75,7 @@ impl<Val, InputMmcs, FriMmcs, Challenge, Challenger> Pcs<Challenge, Challenger>
 where
     Val: ComplexExtendable + PrimeField,
     Challenge: ExtensionField<Val>,
-    InputMmcs: MmcsWriter<Val> + MmcsReader<Val, Proof: Sync, Error: Sync>,
+    InputMmcs: MmcsWriter<Val> + MmcsReader<Val>,
     FriMmcs: MmcsWriter<Challenge> + MmcsReader<Challenge>,
     Challenger: FieldChallenger<Val>
         + GrindingChallenger<Witness = Val>
@@ -352,13 +353,13 @@ where
                     let reduced_index = index >> (log_max_height - log_max_batch_height);
                     let (opened_values, opening_proof) =
                         self.mmcs.open_batch(reduced_index, data).unpack();
-                    let dimensions = self
+                    let dimensions: BatchDimensions = self
                         .mmcs
                         .get_matrices(data)
                         .iter()
                         .map(|matrix| matrix.dimensions())
-                        .collect::<Vec<_>>();
-                    let batch_dimensions = BatchDimensions::from(dimensions.clone());
+                        .collect::<Vec<_>>()
+                        .into();
                     assert_eq!(opened_values.len(), dimensions.len());
                     for (matrix, (opened_values, dimensions)) in
                         opened_values.iter().zip(dimensions.iter()).enumerate()
@@ -372,7 +373,7 @@ where
                     self.mmcs.write_proof_hint(
                         transcript,
                         CircleLabelsDefault::input_opening_proof(query, batch),
-                        &batch_dimensions,
+                        &dimensions,
                         opening_proof,
                     );
                 }

@@ -11,10 +11,9 @@ use alloc::vec::Vec;
 
 use p3_challenger::fs::{Hierarchy, Interaction, Kind, Label, Length};
 use p3_commit::{BatchDimensions, MmcsTranscript};
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_fri::FriParameters;
-use p3_fri::protocol::ProtocolRounds;
 pub use p3_fri::protocol::{BatchSpec, FriLabels, MatrixSpec};
+use p3_fri::protocol::{Protocol as FriProtocolTrait, ProtocolRounds};
 use p3_matrix::Dimensions;
 use p3_util::log2_strict_usize;
 
@@ -106,14 +105,9 @@ impl CircleProtocol {
     ) -> Self {
         <Self as p3_fri::protocol::Protocol>::new(params, batches, extra_query_index_bits, None)
     }
-
-    /// Number of challenge bits sampled for each Circle-FRI query index.
-    pub fn query_bits(&self) -> usize {
-        self.log_max_height + self.extra_query_index_bits
-    }
 }
 
-impl p3_fri::protocol::Protocol for CircleProtocol {
+impl FriProtocolTrait for CircleProtocol {
     fn new<M>(
         params: &FriParameters<M>,
         batches: Vec<BatchSpec>,
@@ -197,8 +191,8 @@ impl p3_fri::protocol::Protocol for CircleProtocol {
         input_mmcs: &InputMmcs,
         params: &FriParameters<FriMmcs>,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>,
     {
@@ -265,8 +259,8 @@ impl p3_fri::protocol::Protocol for CircleProtocol {
         params: &FriParameters<FriMmcs>,
         input_mmcs: &InputMmcs,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>,
     {

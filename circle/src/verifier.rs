@@ -5,6 +5,7 @@ use p3_challenger::fs::{DefaultCodec, ExtensionFieldCodec, FieldToFieldCodec, Ve
 use p3_challenger::{FieldChallenger, GrindingChallenger};
 use p3_commit::{BatchDimensions, BatchOpeningRef, Mmcs, MmcsReader};
 use p3_field::{ExtensionField, PrimeField};
+use p3_fri::protocol::Protocol;
 use p3_fri::verifier::FriError;
 use p3_fri::{FriFoldingStrategy, FriParameters};
 use p3_matrix::Dimensions;

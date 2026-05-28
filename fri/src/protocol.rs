@@ -12,7 +12,6 @@ use core::ops::Range;
 use itertools::Itertools;
 use p3_challenger::fs::{Hierarchy, Interaction, Kind, Label, Length};
 use p3_commit::{BatchDimensions, MmcsTranscript, PolynomialSpace};
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing};
 use p3_matrix::Dimensions;
 use p3_util::log2_strict_usize;
 #[cfg(test)]
@@ -39,8 +38,6 @@ pub trait FriLabels {
     const FINAL_POLY: Label = "final-poly";
     /// Label for the PCS batching challenge.
     const ALPHA: Label = "alpha";
-    /// Label for the checked FRI arity schedule.
-    const LOG_ARITIES: Label = "log-arities";
     /// Prefix for FRI folding challenges.
     const BETA: Label = "beta";
     /// Prefix for query-phase proof-of-work labels.
@@ -86,11 +83,6 @@ pub trait FriLabels {
     /// Label for the PCS batching challenge.
     fn alpha() -> Label {
         Self::ALPHA
-    }
-
-    /// Label for the checked FRI arity schedule.
-    fn log_arities() -> Label {
-        Self::LOG_ARITIES
     }
 
     /// Label for the folding challenge sampled after `round`.
@@ -182,8 +174,8 @@ pub trait Protocol {
         input_mmcs: &InputMmcs,
         params: &FriParameters<FriMmcs>,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>;
 
@@ -194,8 +186,8 @@ pub trait Protocol {
         params: &FriParameters<FriMmcs>,
         input_mmcs: &InputMmcs,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>;
 }
@@ -482,11 +474,6 @@ impl FriProtocol {
             Some(num_random_codewords),
         )
     }
-
-    /// Number of challenge bits sampled for each query index.
-    pub fn query_bits(&self) -> usize {
-        self.log_max_height + self.extra_query_index_bits
-    }
 }
 
 impl Protocol for FriProtocol {
@@ -556,8 +543,8 @@ impl Protocol for FriProtocol {
         input_mmcs: &InputMmcs,
         _params: &FriParameters<FriMmcs>,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>,
     {
@@ -609,8 +596,8 @@ impl Protocol for FriProtocol {
         params: &FriParameters<FriMmcs>,
         input_mmcs: &InputMmcs,
     ) where
-        Val: PrimeCharacteristicRing + Send + Sync + Clone,
-        Challenge: BasedVectorSpace<Val> + Send + Sync + Clone,
+        Val: Send + Sync + Clone,
+        Challenge: Send + Sync + Clone,
         InputMmcs: MmcsTranscript<Val>,
         FriMmcs: MmcsTranscript<Challenge>,
     {
@@ -646,12 +633,6 @@ impl Protocol for FriProtocol {
             Kind::Message,
             FriLabelsDefault::final_poly(),
             Length::Fixed(params.final_poly_len()),
-        ));
-        interactions.push(Interaction::new::<Val>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            FriLabelsDefault::log_arities(),
-            Length::Fixed(self.rounds.log_arities.len()),
         ));
         interactions.push(Interaction::new::<u64>(
             Hierarchy::Atomic,

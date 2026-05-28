@@ -14,7 +14,7 @@ use p3_matrix::Dimensions;
 use p3_util::{log2_strict_usize, reverse_bits_len};
 use thiserror::Error;
 
-use crate::protocol::{BatchSpec, FriLabels, FriLabelsDefault, FriProtocol};
+use crate::protocol::{BatchSpec, FriLabels, FriLabelsDefault, FriProtocol, Protocol};
 use crate::{CommitPhaseProofStep, CommitmentWithOpeningPoints, FriFoldingStrategy, FriParameters};
 
 #[derive(Debug, Error)]
@@ -42,8 +42,6 @@ where
         next_log_height: usize,
         remaining: usize,
     },
-    #[error("input proof batch count mismatch: expected {expected}, got {got}")]
-    InputProofBatchCountMismatch { expected: usize, got: usize },
     #[error("batch {batch}: opened-values matrix count mismatch: expected {expected}, got {got}")]
     BatchOpenedValuesCountMismatch {
         batch: usize,
@@ -68,8 +66,6 @@ where
     FinalPolyMismatch,
     #[error("transcript error: {0}")]
     Transcript(#[from] TranscriptError),
-    #[error("FRI protocol shape error")]
-    ProtocolShape,
 }
 
 /// A chain of FRI input openings allowing a verifier to check a sequence of
@@ -161,21 +157,6 @@ where
         .map(|value| value.into_inner())
         .collect::<Vec<_>>();
 
-    {
-        // Bind the variable-arity schedule into the transcript and ensure it matches the
-        // schedule derived from the protocol shape.
-        let log_arity_values = transcript.next_scalars::<Val, FieldToFieldCodec<Val>>(
-            FriLabelsDefault::log_arities(),
-            protocol.rounds.log_arities.len(),
-        )?;
-
-        for (&expected, got) in protocol.rounds.log_arities.iter().zip(log_arity_values) {
-            if got.into_inner() != Val::from_usize(expected) {
-                return Err(FriError::ProtocolShape);
-            }
-        }
-    }
-
     // Check PoW.
     transcript.check_pow(
         FriLabelsDefault::pow_query(params.query_proof_of_work_bits),
@@ -185,13 +166,13 @@ where
     // The log of the final domain size.
     let log_final_height = params.log_blowup + params.log_final_poly_len;
     for query in 0..params.num_queries {
-        // For each query proof, we start by generating the random index.
+        // For each query, we start by generating the random index.
         let index = transcript
             .challenge_bits(FriLabelsDefault::query_index(query), protocol.query_bits())
             .into_inner();
 
         // Next we open all polynomials `f` at the relevant index and combine them into our FRI inputs.
-        let input_proof = protocol
+        let input_openings = protocol
             .input_batch_dimensions
             .iter()
             .enumerate()
@@ -219,7 +200,7 @@ where
             params,
             protocol.log_max_height,
             index,
-            &input_proof,
+            &input_openings,
             alpha,
             input_mmcs,
             commitments_with_opening_points,
@@ -480,7 +461,7 @@ where
 /// - `params`: The FRI parameters.
 /// - `log_global_max_height`: The log of the maximum height of the input matrices.
 /// - `index`: The index at which to open the functions.
-/// - `input_proof`: A vector of batch openings with each opening containing a
+/// - `input_openings`: A vector of batch openings with each opening containing a
 ///   list of opened values for a collection of matrices along with a batched opening proof.
 /// - `alpha`: The challenge used to combine the functions.
 /// - `input_mmcs`: The input multi-matrix commitment scheme.
@@ -491,7 +472,7 @@ pub(crate) fn open_input<Val, Challenge, InputMmcs, FriMmcs>(
     params: &FriParameters<FriMmcs>,
     log_global_max_height: usize,
     index: usize,
-    input_proof: &[BatchOpening<Val, InputMmcs>],
+    input_openings: &[BatchOpening<Val, InputMmcs>],
     alpha: Challenge,
     input_mmcs: &InputMmcs,
     commitments_with_opening_points: &[CommitmentWithOpeningPoints<
@@ -510,15 +491,14 @@ where
     // log_height -> (alpha_pow, reduced_opening)
     let mut reduced_openings = BTreeMap::<usize, (Challenge, Challenge)>::new();
 
-    if input_proof.len() != commitments_with_opening_points.len() {
-        return Err(FriError::InputProofBatchCountMismatch {
-            expected: commitments_with_opening_points.len(),
-            got: input_proof.len(),
-        });
-    }
+    debug_assert_eq!(
+        input_openings.len(),
+        commitments_with_opening_points.len(),
+        "input openings are derived from the same protocol shape as commitments",
+    );
 
-    // For each batch commitment and opening proof
-    for (batch, (batch_opening, (batch_commit, mats))) in input_proof
+    // For each batch commitment and opening.
+    for (batch, (batch_opening, (batch_commit, mats))) in input_openings
         .iter()
         .zip(commitments_with_opening_points.iter())
         .enumerate()

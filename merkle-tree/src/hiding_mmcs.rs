@@ -336,9 +336,13 @@ where
                 })
             })
             .map(|values| {
-                let roots = values
+                let roots: Vec<[P::Value; DIGEST_ELEMS]> = values
                     .chunks_exact(DIGEST_ELEMS)
-                    .map(|chunk| core::array::from_fn(|i| chunk[i].clone()))
+                    .map(|chunk| {
+                        chunk
+                            .try_into()
+                            .expect("chunks_exact yields digest-sized chunks")
+                    })
                     .collect();
                 MerkleCap::new(roots)
             }))

@@ -83,10 +83,9 @@ where
     Val: TwoAdicField + PrimeField,
     StandardUniform: Distribution<Val>,
     Dft: TwoAdicSubgroupDft<Val>,
-    InputMmcs:
-        MmcsWriter<Val, Digest = Val> + MmcsReader<Val, Digest = Val, Proof: Sync, Error: Sync>,
+    InputMmcs: MmcsWriter<Val, Digest = Val> + MmcsReader<Val, Digest = Val>,
     FriMmcs: MmcsWriter<Challenge, Digest = Val> + MmcsReader<Challenge, Digest = Val>,
-    Challenge: TwoAdicField + ExtensionField<Val>,
+    Challenge: ExtensionField<Val>,
     Challenger: FieldChallenger<Val> + GrindingChallenger<Witness = Val> + DefaultCodec<Val>,
     R: Rng + Send + Sync,
 {
