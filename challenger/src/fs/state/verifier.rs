@@ -14,7 +14,7 @@ use crate::fs::domain_separator::DomainSeparator;
 use crate::fs::error::TranscriptError;
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
-use crate::{CanObserve, GrindingChallenger};
+use crate::{CanObserve, CanSampleBits, GrindingChallenger};
 
 /// Drives a verifier-side transcript in lockstep with a recorded pattern.
 ///
@@ -377,6 +377,20 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         (0..n)
             .map(|_| TranscriptBound::wrap(Cdc::sample(&mut self.challenger)))
             .collect()
+    }
+
+    /// Sample a `bits`-bit challenge integer in lockstep with the prover.
+    pub fn challenge_bits(&mut self, label: Label, bits: usize) -> TranscriptBound<usize>
+    where
+        C: CanSampleBits<usize>,
+    {
+        self.player.interact(Interaction::new::<usize>(
+            Hierarchy::Atomic,
+            Kind::Challenge,
+            label,
+            Length::Fixed(bits),
+        ));
+        TranscriptBound::wrap(self.challenger.sample_bits(bits))
     }
 
     /// Sample one challenge extension-field element in lockstep with the prover.
