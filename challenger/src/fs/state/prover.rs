@@ -11,7 +11,7 @@ use crate::fs::codecs::length_prefix::{bound_byte_width, encode_len_be};
 use crate::fs::domain_separator::DomainSeparator;
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
-use crate::{CanObserve, GrindingChallenger};
+use crate::{CanObserve, CanSampleBits, GrindingChallenger};
 
 /// Drives a prover-side transcript in lockstep with a recorded pattern.
 ///
@@ -334,6 +334,20 @@ impl<C, U: Unit> ProverState<C, U> {
             .collect()
     }
 
+    /// Sample a `bits`-bit challenge integer.
+    pub fn challenge_bits(&mut self, label: Label, bits: usize) -> TranscriptBound<usize>
+    where
+        C: CanSampleBits<usize>,
+    {
+        self.player.interact(Interaction::new::<usize>(
+            Hierarchy::Atomic,
+            Kind::Challenge,
+            label,
+            Length::Fixed(bits),
+        ));
+        TranscriptBound::wrap(self.challenger.sample_bits(bits))
+    }
+
     /// Sample one challenge extension-field element coefficient by coefficient.
     pub fn challenge_extension<F, EF, Cdc>(&mut self, label: Label) -> TranscriptBound<EF>
     where
@@ -411,9 +425,28 @@ mod tests {
     use crate::fs::pattern::{Hierarchy, Interaction, InteractionPattern, Kind, Length};
     use crate::fs::shake128::Shake128;
     use crate::fs::state::{ProverState, VerifierState};
+    use crate::{CanObserve, CanSampleBits};
 
     /// Concrete field exercised in this module's tests.
     type F = BabyBear;
+
+    #[derive(Clone, Default)]
+    struct BitsChallenger {
+        observed: Vec<u8>,
+    }
+
+    impl CanObserve<u8> for BitsChallenger {
+        fn observe(&mut self, value: u8) {
+            self.observed.push(value);
+        }
+    }
+
+    impl CanSampleBits<usize> for BitsChallenger {
+        fn sample_bits(&mut self, bits: usize) -> usize {
+            assert!(bits < usize::BITS as usize);
+            if bits == 0 { 0 } else { (1usize << bits) - 1 }
+        }
+    }
 
     /// Three messages followed by two challenges, each as one fixed-length step.
     fn small_pattern() -> InteractionPattern {
@@ -468,6 +501,34 @@ mod tests {
         for c in &verifier_challenges {
             assert!(c.as_inner().as_canonical_u32() < F::ORDER_U32);
         }
+    }
+
+    #[test]
+    fn challenge_bits_round_trips_through_verifier() {
+        // Fixture state: one 5-bit index challenge.
+        let pattern = InteractionPattern::new(alloc::vec![Interaction::new::<usize>(
+            Hierarchy::Atomic,
+            Kind::Challenge,
+            "index",
+            Length::Fixed(5),
+        )])
+        .unwrap();
+        let mut ds: DomainSeparator<u8> = DomainSeparator::new(0, b"bits", pattern);
+        ds.bind_pattern_hash();
+
+        // Prover samples the challenge without writing any NARG bytes.
+        let mut p = ProverState::<_, u8>::new(BitsChallenger::default(), &ds);
+        let c_p = p.challenge_bits("index", 5);
+        let narg = p.finalize();
+        assert!(narg.is_empty());
+
+        // Verifier samples the same challenge from the same pattern position.
+        let mut v = VerifierState::<_, u8>::new(BitsChallenger::default(), &ds, &narg);
+        let c_v = v.challenge_bits("index", 5);
+        v.finalize().expect("NARG fully consumed");
+
+        assert_eq!(c_p, c_v);
+        assert_eq!(*c_v.as_inner(), 31);
     }
 
     #[test]
