@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 use p3_field::{BasedVectorSpace, PrimeField};
 
+use crate::fs::ExtensionFieldCodec;
 use crate::fs::bound::TranscriptBound;
 use crate::fs::codecs::Codec;
 use crate::fs::codecs::decode_field::{
@@ -136,6 +137,54 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         Ok(bytes)
     }
 
+    /// Replay an `add_message` step from the prover.
+    pub fn next_message<T, Cdc>(
+        &mut self,
+        label: Label,
+    ) -> Result<TranscriptBound<T>, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Scalar,
+        ));
+        let raw = self.take_bytes(Cdc::byte_len())?;
+        let value = Cdc::decode(raw)?;
+        Cdc::observe(&mut self.challenger, &value);
+        Ok(TranscriptBound::wrap(value))
+    }
+
+    /// Replay an `add_messages` step from the prover.
+    pub fn next_messages<T, Cdc>(
+        &mut self,
+        label: Label,
+        n: usize,
+    ) -> Result<Vec<TranscriptBound<T>>, TranscriptError>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.player.interact(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Fixed(n),
+        ));
+        let need = Cdc::byte_len();
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let raw = self.take_bytes(need)?;
+            let value = Cdc::decode(raw)?;
+            Cdc::observe(&mut self.challenger, &value);
+            out.push(TranscriptBound::wrap(value));
+        }
+        Ok(out)
+    }
+
     /// Replay an `add_scalar` step from the prover.
     pub fn next_scalar<F, Cdc>(
         &mut self,
@@ -145,20 +194,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of type `F`.
-        self.player.interact(Interaction::new::<F>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Read the canonical big-endian encoding from the wire.
-        let need = field_byte_size::<F>();
-        let raw = self.take_bytes(need)?;
-        let value = decode_field_be_canonical::<F>(raw)?;
-        // Absorb through the same codec the prover used so both sides agree.
-        Cdc::observe(&mut self.challenger, &value);
-        Ok(TranscriptBound::wrap(value))
+        self.next_message::<F, Cdc>(label)
     }
 
     /// Replay an `add_scalars` step from the prover.
@@ -171,52 +207,36 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a fixed-length list of `n` scalars.
-        self.player.interact(Interaction::new::<F>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Fixed(n),
-        ));
-        // Pull `n` canonical encodings from the wire, decoding, absorbing, and binding each.
-        let need = field_byte_size::<F>();
-        let mut out = Vec::with_capacity(n);
-        for _ in 0..n {
-            let raw = self.take_bytes(need)?;
-            let v = decode_field_be_canonical::<F>(raw)?;
-            Cdc::observe(&mut self.challenger, &v);
-            out.push(TranscriptBound::wrap(v));
-        }
-        Ok(out)
+        self.next_messages::<F, Cdc>(label, n)
     }
 
-    /// Replay a bounded scalar-slice step.
+    /// Replay a bounded typed message step.
     ///
     /// # Algorithm
     ///
     /// 1. Read the length prefix from the wire.
     /// 2. Reject any actual length above `max`.
     /// 3. Absorb the prefix bytes into the sponge, matching the prover.
-    /// 4. Read and absorb that many scalars through the codec.
+    /// 4. Read and absorb that many values through the codec.
     ///
     /// # Errors
     ///
     /// - The length prefix runs past the end of the wire.
-    /// - Any scalar runs past the end of the wire.
+    /// - Any value runs past the end of the wire.
     /// - The decoded length exceeds `max`.
-    /// - Any scalar encoding is non-canonical.
-    pub fn next_scalars_bounded<F, Cdc>(
+    /// - Any value encoding is rejected by the codec.
+    pub fn next_messages_bounded<T, Cdc>(
         &mut self,
         label: Label,
         max: usize,
-    ) -> Result<Vec<TranscriptBound<F>>, TranscriptError>
+    ) -> Result<Vec<TranscriptBound<T>>, TranscriptError>
     where
-        F: PrimeField,
+        T: Clone,
         C: CanObserve<u8>,
-        Cdc: Codec<C, F>,
+        Cdc: Codec<C, T>,
     {
         // Validate against the recorded pattern step so shape divergence panics here.
-        self.player.interact(Interaction::new::<F>(
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -237,19 +257,33 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         //
         // This keeps the transcript prefix-free, matching CO25 §6.2.
         self.challenger.observe_slice(&len_bytes);
-        // One canonical field encoding per scalar.
-        let need = field_byte_size::<F>();
+        // One codec encoding per value.
+        let need = Cdc::byte_len();
         let mut out = Vec::with_capacity(actual);
         for _ in 0..actual {
-            // Pull one scalar's bytes off the wire and reject non-canonical encodings.
+            // Pull one value's bytes off the wire and let the codec reject malformed encodings.
             let raw = self.take_bytes(need)?;
-            let v = decode_field_be_canonical::<F>(raw)?;
+            let value = Cdc::decode(raw)?;
             // Absorb through the same codec the prover used so both sides agree.
-            Cdc::observe(&mut self.challenger, &v);
+            Cdc::observe(&mut self.challenger, &value);
             // Hand back a binding witness alongside the decoded value.
-            out.push(TranscriptBound::wrap(v));
+            out.push(TranscriptBound::wrap(value));
         }
         Ok(out)
+    }
+
+    /// Replay a bounded scalar-slice step.
+    pub fn next_scalars_bounded<F, Cdc>(
+        &mut self,
+        label: Label,
+        max: usize,
+    ) -> Result<Vec<TranscriptBound<F>>, TranscriptError>
+    where
+        F: PrimeField,
+        C: CanObserve<u8>,
+        Cdc: Codec<C, F>,
+    {
+        self.next_messages_bounded::<F, Cdc>(label, max)
     }
 
     /// Replay an `add_extension` step from the prover.
@@ -259,35 +293,25 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
     ) -> Result<TranscriptBound<EF>, TranscriptError>
     where
         F: PrimeField,
-        EF: BasedVectorSpace<F>,
+        EF: Clone + BasedVectorSpace<F>,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of extension type `EF`.
-        self.player.interact(Interaction::new::<EF>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Read one base-field coefficient per basis index, decoding and absorbing each.
-        let need = field_byte_size::<F>();
-        let basis_len = EF::DIMENSION;
-        let mut coeffs: Vec<F> = Vec::with_capacity(basis_len);
-        for _ in 0..basis_len {
-            let raw = self.take_bytes(need)?;
-            let v = decode_field_be_canonical::<F>(raw)?;
-            Cdc::observe(&mut self.challenger, &v);
-            coeffs.push(v);
-        }
-        // Reconstruct in the same basis order the prover used.
-        let value = EF::from_basis_coefficients_iter(coeffs.into_iter()).ok_or(
-            TranscriptError::BadProofShape {
-                reason: "extension element basis size mismatch",
-            },
-        )?;
-        Ok(TranscriptBound::wrap(value))
+        self.next_message::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label)
     }
 
+    /// Replay an `add_extensions` step from the prover.
+    pub fn next_extensions<F, EF, Cdc>(
+        &mut self,
+        label: Label,
+        n: usize,
+    ) -> Result<Vec<TranscriptBound<EF>>, TranscriptError>
+    where
+        F: PrimeField,
+        EF: Clone + BasedVectorSpace<F>,
+        Cdc: Codec<C, F>,
+    {
+        self.next_messages::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, n)
+    }
     /// Replay an `add_hint` step.
     ///
     /// Hint bytes are returned to the caller; they are never absorbed.
@@ -305,28 +329,19 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         self.take_bytes(byte_len)
     }
 
-    /// Replay a bounded hint step.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Read the length prefix from the wire.
-    /// 2. Reject any actual length above `max`.
-    /// 3. Return the payload bytes as a borrowed slice.
+    /// Replay a bounded typed hint step.
     ///
     /// Nothing is absorbed into the sponge.
-    ///
-    /// # Errors
-    ///
-    /// - The length prefix runs past the end of the wire.
-    /// - The payload runs past the end of the wire.
-    /// - The decoded length exceeds `max`.
-    pub fn next_hint_bounded(
+    pub fn next_hints_bounded<T, Cdc>(
         &mut self,
         label: Label,
         max: usize,
-    ) -> Result<&'a [u8], TranscriptError> {
+    ) -> Result<Vec<T>, TranscriptError>
+    where
+        Cdc: Codec<C, T>,
+    {
         // Validate against the recorded pattern step so shape divergence panics here.
-        self.player.interact(Interaction::new::<u8>(
+        self.player.interact(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
@@ -343,8 +358,14 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
                 reason: "hint length exceeds declared maximum",
             });
         }
-        // Hand back the payload as a borrowed slice — no sponge absorption.
-        self.take_bytes(actual)
+        // Decode typed values from the wire without absorbing them.
+        let need = Cdc::byte_len();
+        let mut out = Vec::with_capacity(actual);
+        for _ in 0..actual {
+            let raw = self.take_bytes(need)?;
+            out.push(Cdc::decode(raw)?);
+        }
+        Ok(out)
     }
 
     /// Sample one challenge scalar in lockstep with the prover.
@@ -458,6 +479,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
 #[cfg(test)]
 mod tests {
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use p3_baby_bear::BabyBear;
     use p3_field::PrimeCharacteristicRing;
@@ -466,9 +488,42 @@ mod tests {
     use crate::fs::codecs::BytesToFieldCodec;
     use crate::fs::pattern::InteractionPattern;
     use crate::fs::shake128::Shake128;
+    use crate::{CanObserve, CanSample};
 
     /// Concrete field exercised in this module's tests.
     type F = BabyBear;
+
+    /// Identity byte codec.
+    struct ByteCodec;
+
+    impl Codec<Shake128, u8> for ByteCodec {
+        const SECURITY_BITS: u32 = 8;
+
+        fn observe(challenger: &mut Shake128, value: &u8) {
+            challenger.observe(*value);
+        }
+
+        fn sample(challenger: &mut Shake128) -> u8 {
+            challenger.sample()
+        }
+
+        fn byte_len() -> usize {
+            1
+        }
+
+        fn encode(value: &u8) -> Vec<u8> {
+            vec![*value]
+        }
+
+        fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+            match bytes {
+                [value] => Ok(*value),
+                _ => Err(TranscriptError::BadProofShape {
+                    reason: "byte encoding must contain exactly one byte",
+                }),
+            }
+        }
+    }
 
     fn one_msg_pattern() -> InteractionPattern {
         InteractionPattern::new(vec![Interaction::new::<F>(
@@ -577,7 +632,7 @@ mod tests {
         // The verifier sees the over-cap prefix and surfaces a structured error.
         let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
-            .next_hint_bounded("auth", 4)
+            .next_hints_bounded::<u8, ByteCodec>("auth", 4)
             .expect_err("length above max must be rejected");
         assert_eq!(
             err,
@@ -614,7 +669,7 @@ mod tests {
         // The verifier runs out of bytes mid-payload and reports a malformed wire.
         let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
-            .next_hint_bounded("auth", 8)
+            .next_hints_bounded::<u8, ByteCodec>("auth", 8)
             .expect_err("truncated payload must be rejected");
         assert_eq!(
             err,
