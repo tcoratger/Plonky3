@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 
 use num_bigint::BigUint;
-use p3_field::PrimeField;
+use p3_field::{Field, PrimeField};
 
 use crate::fs::error::TranscriptError;
 
@@ -19,14 +19,14 @@ pub const EXTRA_BYTES: usize = 16;
 /// Bytes required for the IETF decoding pattern at field `F`:
 ///
 /// `ceil(log2(p) / 8) + 16`.
-pub fn required_bytes<F: PrimeField>() -> usize {
+pub fn required_bytes<F: Field>() -> usize {
     field_byte_size::<F>() + EXTRA_BYTES
 }
 
 /// Bytes occupied by the canonical big-endian encoding of `F`:
 ///
 /// `ceil(log2(p) / 8)`.
-pub fn field_byte_size<F: PrimeField>() -> usize {
+pub fn field_byte_size<F: Field>() -> usize {
     let order = F::order();
     let bits = order.bits() as usize;
     bits.div_ceil(8)

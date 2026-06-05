@@ -1,10 +1,15 @@
 //! Identity codec for sponges whose alphabet is the field itself.
 
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use p3_field::Field;
+use p3_field::PrimeField;
 
+use crate::fs::TranscriptError;
 use crate::fs::codecs::Codec;
+use crate::fs::codecs::decode_field::{
+    decode_field_be_canonical, encode_field_be, field_byte_size,
+};
 use crate::{CanObserve, CanSample};
 
 /// Identity codec: the sponge alphabet is the field, so no encoding step is needed.
@@ -12,7 +17,7 @@ pub struct FieldToFieldCodec<F>(PhantomData<F>);
 
 impl<C, F> Codec<C, F> for FieldToFieldCodec<F>
 where
-    F: Field,
+    F: PrimeField,
     C: CanObserve<F> + CanSample<F>,
 {
     const SECURITY_BITS: u32 = 128;
@@ -23,6 +28,18 @@ where
 
     fn sample(challenger: &mut C) -> F {
         challenger.sample()
+    }
+
+    fn byte_len() -> usize {
+        field_byte_size::<F>()
+    }
+
+    fn encode(value: &F) -> Vec<u8> {
+        encode_field_be(value)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<F, TranscriptError> {
+        decode_field_be_canonical(bytes)
     }
 }
 
