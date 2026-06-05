@@ -460,12 +460,12 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         }))
     }
 
-    /// Replay a proof-of-work step.
+    /// Replay a labelled proof-of-work step.
     ///
     /// - Reads the witness from the wire,
     /// - Checks its encoding is canonical,
     /// - Absorbs it through the challenger's PoW path.
-    pub fn check_pow(&mut self, bits: usize) -> Result<(), TranscriptError>
+    pub fn check_pow(&mut self, label: Label, bits: usize) -> Result<(), TranscriptError>
     where
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
@@ -474,7 +474,7 @@ impl<'a, C, U: Unit> VerifierState<'a, C, U> {
         self.player.interact(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
-            "pow",
+            label,
             Length::Scalar,
         ));
         // Read the witness from the wire and decode it as a canonical field element.

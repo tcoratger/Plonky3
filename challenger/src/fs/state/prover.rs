@@ -462,7 +462,7 @@ impl<C, U: Unit> ProverState<C, U> {
     }
 
     /// Run a proof-of-work step and append the witness to the wire buffer.
-    pub fn pow(&mut self, bits: usize)
+    pub fn pow(&mut self, label: Label, bits: usize)
     where
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
@@ -471,7 +471,7 @@ impl<C, U: Unit> ProverState<C, U> {
         self.player.interact(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
-            "pow",
+            label,
             Length::Scalar,
         ));
         // Grind through the challenger's SIMD path.
