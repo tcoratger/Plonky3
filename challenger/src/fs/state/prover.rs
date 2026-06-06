@@ -9,6 +9,7 @@ use crate::fs::bound::TranscriptBound;
 use crate::fs::codecs::Codec;
 use crate::fs::codecs::decode_field::field_byte_size;
 use crate::fs::codecs::length_prefix::{bound_byte_width, encode_len_be};
+use crate::fs::debug::{LabelUniqueness, ProofDebug, ProofObjectInfo};
 use crate::fs::domain_separator::DomainSeparator;
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
@@ -25,6 +26,8 @@ pub struct ProverState<C, U: Unit = u8> {
     player: PatternPlayer,
     /// Accumulated wire bytes returned at finalisation.
     narg: Vec<u8>,
+    /// Proof object byte spans recorded while writing the proof.
+    proof_objects: Vec<ProofObjectInfo>,
     /// Type-level marker for the sponge alphabet.
     _u: core::marker::PhantomData<U>,
 }
@@ -53,6 +56,7 @@ impl<C, U: Unit> ProverState<C, U> {
             challenger,
             player,
             narg: Vec::new(),
+            proof_objects: Vec::new(),
             _u: core::marker::PhantomData,
         }
     }
@@ -80,11 +84,44 @@ impl<C, U: Unit> ProverState<C, U> {
         let player = unsafe { core::ptr::read(&this.player) };
         let narg = unsafe { core::ptr::read(&this.narg) };
         let challenger = unsafe { core::ptr::read(&this.challenger) };
+        let proof_objects = unsafe { core::ptr::read(&this.proof_objects) };
+        // Drop the challenger explicitly: the wrapper's Drop is suppressed.
+        drop(challenger);
+        drop(proof_objects);
+        // Strict pattern-fully-consumed check.
+        player.finalize();
+        narg
+    }
+
+    /// Finalise the driver and return proof bytes plus debug metadata.
+    ///
+    /// # Panics
+    ///
+    /// When the recorded pattern is not fully consumed.
+    pub fn finalize_with_debug(self, label_uniqueness: LabelUniqueness) -> ProofDebug {
+        // The custom Drop impl prevents direct destructuring of `self`;
+        // So move each field out by hand under ManuallyDrop.
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: each field is moved out exactly once, then Drop never runs on `this`.
+        let player = unsafe { core::ptr::read(&this.player) };
+        let narg = unsafe { core::ptr::read(&this.narg) };
+        let challenger = unsafe { core::ptr::read(&this.challenger) };
+        let proof_objects = unsafe { core::ptr::read(&this.proof_objects) };
         // Drop the challenger explicitly: the wrapper's Drop is suppressed.
         drop(challenger);
         // Strict pattern-fully-consumed check.
         player.finalize();
-        narg
+        ProofDebug::new(narg, proof_objects, label_uniqueness)
+    }
+
+    fn record_proof_object(&mut self, interaction: Interaction) {
+        self.proof_objects.push(ProofObjectInfo {
+            interaction_index: self.player.position(),
+            interaction,
+            byte_offset: self.narg.len(),
+        });
+        // Validate against the recorded pattern step so shape divergence panics here.
+        self.player.interact(interaction);
     }
 
     /// Absorb a salt step and record its bytes in the wire buffer.
@@ -92,8 +129,7 @@ impl<C, U: Unit> ProverState<C, U> {
     where
         C: CanObserve<u8>,
     {
-        // Validate: the next pattern step is a salt of the given length.
-        self.player.interact(Interaction::new::<u8>(
+        self.record_proof_object(Interaction::new::<u8>(
             Hierarchy::Atomic,
             Kind::Salt,
             "salt",
@@ -111,8 +147,7 @@ impl<C, U: Unit> ProverState<C, U> {
         T: Clone,
         Cdc: Codec<C, T>,
     {
-        // Validate: the next pattern step is a scalar message of type `T`.
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -132,8 +167,7 @@ impl<C, U: Unit> ProverState<C, U> {
         T: Clone,
         Cdc: Codec<C, T>,
     {
-        // Validate: the next pattern step is a fixed-length list of scalars.
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -212,8 +246,7 @@ impl<C, U: Unit> ProverState<C, U> {
             "message length {} exceeds declared maximum {max}",
             values.len(),
         );
-        // Validate against the recorded pattern step so shape divergence panics here.
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -292,7 +325,7 @@ impl<C, U: Unit> ProverState<C, U> {
         T: Clone,
         Cdc: Codec<C, T>,
     {
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
@@ -310,7 +343,7 @@ impl<C, U: Unit> ProverState<C, U> {
         T: Clone,
         Cdc: Codec<C, T>,
     {
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
@@ -350,8 +383,7 @@ impl<C, U: Unit> ProverState<C, U> {
             "hint length {} exceeds declared maximum {max}",
             values.len(),
         );
-        // Validate against the recorded pattern step so any shape divergence panics here.
-        self.player.interact(Interaction::new::<T>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
@@ -425,8 +457,7 @@ impl<C, U: Unit> ProverState<C, U> {
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
     {
-        // Validate: the next pattern step is a proof-of-work step.
-        self.player.interact(Interaction::new::<u64>(
+        self.record_proof_object(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
             "pow",

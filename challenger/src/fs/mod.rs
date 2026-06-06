@@ -5,6 +5,7 @@
 
 pub mod bound;
 pub mod codecs;
+pub mod debug;
 pub mod domain_separator;
 pub mod error;
 pub mod pattern;
@@ -16,6 +17,7 @@ pub use bound::TranscriptBound;
 pub use codecs::{
     BytesToFieldCodec, Codec, ExtensionFieldCodec, FieldToBytesCodec, FieldToFieldCodec,
 };
+pub use debug::{LabelUniqueness, ProofDebug, ProofObjectInfo};
 pub use domain_separator::{DomainSeparator, PROTOCOL_ID_LEN};
 pub use error::{
     InvalidKindInfo, MismatchedBeginEndInfo, MissingBeginInfo, MissingEndInfo, PatternMismatchInfo,
