@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::CanObserve;
+use crate::fs::codecs::Codec;
 use crate::fs::pattern::InteractionPattern;
 use crate::fs::unit::Unit;
 
@@ -89,20 +89,29 @@ impl<U: Unit> DomainSeparator<U> {
         &self.pattern
     }
 
-    /// Absorb the seed into a byte-shaped sponge.
+    /// Absorb the seed through a byte codec.
     ///
     /// Wire layout: `[protocol_id | len_be_4_bytes | label | DOMAIN_TAG]`.
-    pub fn seed_bytes<C>(&self, challenger: &mut C)
+    ///
+    /// The codec lets byte-shaped challengers absorb the bytes directly and lets
+    /// field-shaped challengers lift each seed byte into their native alphabet.
+    pub fn seed_bytes<Cdc, C>(&self, challenger: &mut C)
     where
-        C: CanObserve<u8>,
+        Cdc: Codec<C, u8>,
     {
-        challenger.observe_slice(&self.protocol_id);
+        for byte in self.protocol_id {
+            Cdc::observe(challenger, &byte);
+        }
         // Length prefix prevents two labels of different lengths from colliding.
         let len = self.instance_label.len() as u32;
-        challenger.observe_slice(&len.to_be_bytes());
-        challenger.observe_slice(&self.instance_label);
+        for byte in len.to_be_bytes() {
+            Cdc::observe(challenger, &byte);
+        }
+        for byte in &self.instance_label {
+            Cdc::observe(challenger, byte);
+        }
         // Terminator stops later absorbs from extending the seed.
-        challenger.observe(DOMAIN_TAG);
+        Cdc::observe(challenger, &DOMAIN_TAG);
     }
 }
 
@@ -111,9 +120,13 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use p3_baby_bear::BabyBear;
+    use p3_field::PrimeField32;
+
     use super::*;
-    use crate::CanObserve;
+    use crate::fs::codecs::{ByteCodec, FieldToBytesCodec};
     use crate::fs::pattern::{Hierarchy, Interaction, InteractionPattern, Kind, Length};
+    use crate::{CanObserve, CanSample};
 
     /// Captures every absorbed byte in order.
     #[derive(Default)]
@@ -124,6 +137,30 @@ mod tests {
     impl CanObserve<u8> for ByteRecorder {
         fn observe(&mut self, value: u8) {
             self.buf.push(value);
+        }
+    }
+
+    impl CanSample<u8> for ByteRecorder {
+        fn sample(&mut self) -> u8 {
+            unreachable!("seed_bytes only observes bytes")
+        }
+    }
+
+    /// Captures every absorbed BabyBear value in order.
+    #[derive(Default)]
+    struct FieldRecorder {
+        buf: Vec<BabyBear>,
+    }
+
+    impl CanObserve<BabyBear> for FieldRecorder {
+        fn observe(&mut self, value: BabyBear) {
+            self.buf.push(value);
+        }
+    }
+
+    impl CanSample<BabyBear> for FieldRecorder {
+        fn sample(&mut self) -> BabyBear {
+            unreachable!("seed_bytes only observes bytes")
         }
     }
 
@@ -165,7 +202,7 @@ mod tests {
         let mut ds: DomainSeparator<u8> = DomainSeparator::new(7, b"p3", empty_pattern());
         ds.instance(b"hello");
         let mut rec = ByteRecorder::default();
-        ds.seed_bytes(&mut rec);
+        ds.seed_bytes::<ByteCodec, _>(&mut rec);
 
         assert_eq!(rec.buf.len(), PROTOCOL_ID_LEN + 4 + 5 + 1);
         assert_eq!(rec.buf[0], 7);
@@ -180,14 +217,33 @@ mod tests {
     }
 
     #[test]
+    fn codec_seed_bytes_preserves_seed_layout() {
+        let mut ds: DomainSeparator<u8> = DomainSeparator::new(7, b"p3", empty_pattern());
+        ds.instance(b"xyz");
+
+        let mut byte_rec = ByteRecorder::default();
+        ds.seed_bytes::<ByteCodec, _>(&mut byte_rec);
+
+        let mut field_rec = FieldRecorder::default();
+        ds.seed_bytes::<FieldToBytesCodec<BabyBear>, _>(&mut field_rec);
+
+        let field_seed = field_rec
+            .buf
+            .iter()
+            .map(|value| value.as_canonical_u32() as u8)
+            .collect::<Vec<_>>();
+        assert_eq!(field_seed, byte_rec.buf);
+    }
+
+    #[test]
     fn distinct_protocol_names_seed_different_streams() {
         // Different name -> different identifier bytes -> different seed.
         let a: DomainSeparator<u8> = DomainSeparator::new(1, b"a", empty_pattern());
         let b: DomainSeparator<u8> = DomainSeparator::new(1, b"b", empty_pattern());
         let mut ra = ByteRecorder::default();
         let mut rb = ByteRecorder::default();
-        a.seed_bytes(&mut ra);
-        b.seed_bytes(&mut rb);
+        a.seed_bytes::<ByteCodec, _>(&mut ra);
+        b.seed_bytes::<ByteCodec, _>(&mut rb);
         assert_ne!(ra.buf, rb.buf);
     }
 
@@ -200,8 +256,8 @@ mod tests {
         b.instance(b"instance_b");
         let mut ra = ByteRecorder::default();
         let mut rb = ByteRecorder::default();
-        a.seed_bytes(&mut ra);
-        b.seed_bytes(&mut rb);
+        a.seed_bytes::<ByteCodec, _>(&mut ra);
+        b.seed_bytes::<ByteCodec, _>(&mut rb);
         assert_ne!(ra.buf, rb.buf);
     }
 
@@ -239,8 +295,8 @@ mod tests {
 
         let mut ra = ByteRecorder::default();
         let mut rb = ByteRecorder::default();
-        a.seed_bytes(&mut ra);
-        b.seed_bytes(&mut rb);
+        a.seed_bytes::<ByteCodec, _>(&mut ra);
+        b.seed_bytes::<ByteCodec, _>(&mut rb);
         assert_ne!(ra.buf, rb.buf);
     }
 }
