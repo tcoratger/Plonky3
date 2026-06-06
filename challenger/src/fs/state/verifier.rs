@@ -48,13 +48,13 @@ impl<C, U: Unit> Drop for VerifierState<'_, C, U> {
 }
 
 impl<'a, C, U: Unit> VerifierState<'a, C, U> {
-    /// Build a driver and seed the challenger from the domain separator.
-    pub fn new(mut challenger: C, ds: &DomainSeparator<U>, narg: &'a [u8]) -> Self
+    /// Build a driver and seed the challenger through a byte codec.
+    pub fn new<Cdc>(mut challenger: C, ds: &DomainSeparator<U>, narg: &'a [u8]) -> Self
     where
-        C: CanObserve<u8>,
+        Cdc: Codec<C, u8>,
     {
         // Seed identically to the prover so both sides land on the same sponge state.
-        ds.seed_bytes(&mut challenger);
+        ds.seed_bytes::<Cdc, _>(&mut challenger);
         let player = PatternPlayer::new(ds.pattern().clone());
         Self {
             challenger,
@@ -463,7 +463,7 @@ mod tests {
     use p3_field::PrimeCharacteristicRing;
 
     use super::*;
-    use crate::fs::codecs::BytesToFieldCodec;
+    use crate::fs::codecs::{ByteCodec, BytesToFieldCodec};
     use crate::fs::pattern::InteractionPattern;
     use crate::fs::shake128::Shake128;
 
@@ -487,7 +487,7 @@ mod tests {
         let mut ds: DomainSeparator<u8> = DomainSeparator::new(0, b"trunc", pat);
         ds.bind_pattern_hash();
         let narg = [0u8; 1];
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
             .next_scalar::<F, BytesToFieldCodec<F>>("msg")
             .expect_err("truncated NARG must error");
@@ -506,7 +506,7 @@ mod tests {
         let mut ds: DomainSeparator<u8> = DomainSeparator::new(0, b"non-canon", pat);
         ds.bind_pattern_hash();
         let narg = [0xffu8; 4];
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
             .next_scalar::<F, BytesToFieldCodec<F>>("msg")
             .expect_err("non-canonical encoding must error");
@@ -527,13 +527,13 @@ mod tests {
 
         // Prover writes a valid NARG, then we smuggle one extra byte at the tail.
         use crate::fs::state::ProverState;
-        let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
+        let mut p = ProverState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds);
         p.add_scalar::<F, BytesToFieldCodec<F>>("msg", &F::from_u32(7u32));
         let mut narg = p.finalize();
         narg.push(0x42);
 
         // Verifier consumes the legal scalar, then finalize must reject the leftover byte.
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let _ = v
             .next_scalar::<F, BytesToFieldCodec<F>>("msg")
             .expect("legal scalar");
@@ -575,7 +575,7 @@ mod tests {
         let narg = [5u8, 0, 0, 0, 0, 0, 0];
 
         // The verifier sees the over-cap prefix and surfaces a structured error.
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
             .next_hint_bounded("auth", 4)
             .expect_err("length above max must be rejected");
@@ -612,7 +612,7 @@ mod tests {
         let narg = [7u8, 0xaa, 0xbb];
 
         // The verifier runs out of bytes mid-payload and reports a malformed wire.
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
             .next_hint_bounded("auth", 8)
             .expect_err("truncated payload must be rejected");
@@ -649,7 +649,7 @@ mod tests {
         let narg = [3u8];
 
         // The verifier surfaces a structured error before touching the sponge.
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let err = v
             .next_scalars_bounded::<F, BytesToFieldCodec<F>>("msgs", 2)
             .expect_err("length above max must be rejected");
@@ -669,7 +669,7 @@ mod tests {
         let mut ds: DomainSeparator<u8> = DomainSeparator::new(0, b"mismatch", pat);
         ds.bind_pattern_hash();
         let narg = [0u8; 4];
-        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let mut v = VerifierState::<_, u8>::new::<ByteCodec>(Shake128::new(&[0u8; 64]), &ds, &narg);
         let _ = v.next_scalar::<F, BytesToFieldCodec<F>>("different");
     }
 }

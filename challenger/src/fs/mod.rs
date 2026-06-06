@@ -14,7 +14,7 @@ pub mod unit;
 
 pub use bound::TranscriptBound;
 pub use codecs::{
-    BytesToFieldCodec, Codec, ExtensionFieldCodec, FieldToBytesCodec, FieldToFieldCodec,
+    ByteCodec, BytesToFieldCodec, Codec, ExtensionFieldCodec, FieldToBytesCodec, FieldToFieldCodec,
 };
 pub use domain_separator::{DomainSeparator, PROTOCOL_ID_LEN};
 pub use error::{
