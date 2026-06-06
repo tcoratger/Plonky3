@@ -4,10 +4,12 @@ use alloc::vec::Vec;
 
 use p3_field::{BasedVectorSpace, PrimeField};
 
+use crate::fs::ExtensionFieldCodec;
 use crate::fs::bound::TranscriptBound;
 use crate::fs::codecs::Codec;
-use crate::fs::codecs::decode_field::{encode_field_be, field_byte_size};
+use crate::fs::codecs::decode_field::field_byte_size;
 use crate::fs::codecs::length_prefix::{bound_byte_width, encode_len_be};
+use crate::fs::debug::{LabelUniqueness, ProofDebug, ProofObjectInfo};
 use crate::fs::domain_separator::DomainSeparator;
 use crate::fs::pattern::{Hierarchy, Interaction, Kind, Label, Length, Pattern, PatternPlayer};
 use crate::fs::unit::Unit;
@@ -24,6 +26,8 @@ pub struct ProverState<C, U: Unit = u8> {
     player: PatternPlayer,
     /// Accumulated wire bytes returned at finalisation.
     narg: Vec<u8>,
+    /// Proof object byte spans recorded while writing the proof.
+    proof_objects: Vec<ProofObjectInfo>,
     /// Type-level marker for the sponge alphabet.
     _u: core::marker::PhantomData<U>,
 }
@@ -52,6 +56,7 @@ impl<C, U: Unit> ProverState<C, U> {
             challenger,
             player,
             narg: Vec::new(),
+            proof_objects: Vec::new(),
             _u: core::marker::PhantomData,
         }
     }
@@ -79,11 +84,44 @@ impl<C, U: Unit> ProverState<C, U> {
         let player = unsafe { core::ptr::read(&this.player) };
         let narg = unsafe { core::ptr::read(&this.narg) };
         let challenger = unsafe { core::ptr::read(&this.challenger) };
+        let proof_objects = unsafe { core::ptr::read(&this.proof_objects) };
+        // Drop the challenger explicitly: the wrapper's Drop is suppressed.
+        drop(challenger);
+        drop(proof_objects);
+        // Strict pattern-fully-consumed check.
+        player.finalize();
+        narg
+    }
+
+    /// Finalise the driver and return proof bytes plus debug metadata.
+    ///
+    /// # Panics
+    ///
+    /// When the recorded pattern is not fully consumed.
+    pub fn finalize_with_debug(self, label_uniqueness: LabelUniqueness) -> ProofDebug {
+        // The custom Drop impl prevents direct destructuring of `self`;
+        // So move each field out by hand under ManuallyDrop.
+        let this = core::mem::ManuallyDrop::new(self);
+        // SAFETY: each field is moved out exactly once, then Drop never runs on `this`.
+        let player = unsafe { core::ptr::read(&this.player) };
+        let narg = unsafe { core::ptr::read(&this.narg) };
+        let challenger = unsafe { core::ptr::read(&this.challenger) };
+        let proof_objects = unsafe { core::ptr::read(&this.proof_objects) };
         // Drop the challenger explicitly: the wrapper's Drop is suppressed.
         drop(challenger);
         // Strict pattern-fully-consumed check.
         player.finalize();
-        narg
+        ProofDebug::new(narg, proof_objects, label_uniqueness)
+    }
+
+    fn record_proof_object(&mut self, interaction: Interaction) {
+        self.proof_objects.push(ProofObjectInfo {
+            interaction_index: self.player.position(),
+            interaction,
+            byte_offset: self.narg.len(),
+        });
+        // Validate against the recorded pattern step so shape divergence panics here.
+        self.player.interact(interaction);
     }
 
     /// Absorb a salt step and record its bytes in the wire buffer.
@@ -91,8 +129,7 @@ impl<C, U: Unit> ProverState<C, U> {
     where
         C: CanObserve<u8>,
     {
-        // Validate: the next pattern step is a salt of the given length.
-        self.player.interact(Interaction::new::<u8>(
+        self.record_proof_object(Interaction::new::<u8>(
             Hierarchy::Atomic,
             Kind::Salt,
             "salt",
@@ -104,14 +141,13 @@ impl<C, U: Unit> ProverState<C, U> {
         self.narg.extend_from_slice(salt_bytes);
     }
 
-    /// Absorb one prover scalar through the supplied codec.
-    pub fn add_scalar<F, Cdc>(&mut self, label: Label, value: &F) -> TranscriptBound<F>
+    /// Absorb one typed prover message through the supplied codec.
+    pub fn add_message<T, Cdc>(&mut self, label: Label, value: &T) -> TranscriptBound<T>
     where
-        F: PrimeField,
-        Cdc: Codec<C, F>,
+        T: Clone,
+        Cdc: Codec<C, T>,
     {
-        // Validate: the next pattern step is a scalar message of type `F`.
-        self.player.interact(Interaction::new::<F>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -119,10 +155,42 @@ impl<C, U: Unit> ProverState<C, U> {
         ));
         // Absorb through the codec; the codec decides field vs. byte path.
         Cdc::observe(&mut self.challenger, value);
-        // Append the canonical big-endian encoding to the wire.
-        let bytes = encode_field_be::<F>(value);
+        // Append the codec-selected encoding to the wire.
+        let bytes = Cdc::encode(value);
         self.narg.extend_from_slice(&bytes);
-        TranscriptBound::wrap(*value)
+        TranscriptBound::wrap(value.clone())
+    }
+
+    /// Absorb a known-length list of typed prover messages under a single pattern step.
+    pub fn add_messages<T, Cdc>(&mut self, label: Label, values: &[T]) -> Vec<TranscriptBound<T>>
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.record_proof_object(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Message,
+            label,
+            Length::Fixed(values.len()),
+        ));
+        // Absorb each value, mirror its codec encoding to the wire, and bind it.
+        let mut bound = Vec::with_capacity(values.len());
+        for value in values {
+            Cdc::observe(&mut self.challenger, value);
+            let bytes = Cdc::encode(value);
+            self.narg.extend_from_slice(&bytes);
+            bound.push(TranscriptBound::wrap(value.clone()));
+        }
+        bound
+    }
+
+    /// Absorb one prover scalar through the supplied codec.
+    pub fn add_scalar<F, Cdc>(&mut self, label: Label, value: &F) -> TranscriptBound<F>
+    where
+        F: PrimeField,
+        Cdc: Codec<C, F>,
+    {
+        self.add_message::<F, Cdc>(label, value)
     }
 
     /// Absorb a known-length list of scalars under a single pattern step.
@@ -133,30 +201,15 @@ impl<C, U: Unit> ProverState<C, U> {
         F: PrimeField,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a fixed-length list of scalars.
-        self.player.interact(Interaction::new::<F>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Fixed(values.len()),
-        ));
-        // Absorb each value, mirror its canonical encoding to the wire, and bind it.
-        let mut bound = Vec::with_capacity(values.len());
-        for v in values {
-            Cdc::observe(&mut self.challenger, v);
-            let bytes = encode_field_be::<F>(v);
-            self.narg.extend_from_slice(&bytes);
-            bound.push(TranscriptBound::wrap(*v));
-        }
-        bound
+        self.add_messages::<F, Cdc>(label, values)
     }
 
-    /// Absorb a variable-length list of at most `max` scalars under a single step.
+    /// Absorb a variable-length list of at most `max` typed prover messages.
     ///
     /// # Wire format
     ///
     /// ```text
-    ///     [len in W bytes, big-endian][canonical encoding of each value]
+    ///     [len in W bytes, big-endian][codec encoding of each value]
     /// ```
     ///
     /// # Sponge layout
@@ -176,16 +229,16 @@ impl<C, U: Unit> ProverState<C, U> {
     /// # Panics
     ///
     /// When the supplied slice is longer than `max`.
-    pub fn add_scalars_bounded<F, Cdc>(
+    pub fn add_messages_bounded<T, Cdc>(
         &mut self,
         label: Label,
-        values: &[F],
+        values: &[T],
         max: usize,
-    ) -> Vec<TranscriptBound<F>>
+    ) -> Vec<TranscriptBound<T>>
     where
-        F: PrimeField,
+        T: Clone,
         C: CanObserve<u8>,
-        Cdc: Codec<C, F>,
+        Cdc: Codec<C, T>,
     {
         // Caller bug: writing more than the cap would diverge from the recorded pattern.
         assert!(
@@ -193,8 +246,7 @@ impl<C, U: Unit> ProverState<C, U> {
             "message length {} exceeds declared maximum {max}",
             values.len(),
         );
-        // Validate against the recorded pattern step so shape divergence panics here.
-        self.player.interact(Interaction::new::<F>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Message,
             label,
@@ -209,85 +261,129 @@ impl<C, U: Unit> ProverState<C, U> {
         self.challenger.observe_slice(&len_bytes[..width]);
         // Mirror the same prefix onto the wire so the verifier sees the count.
         self.narg.extend_from_slice(&len_bytes[..width]);
-        // Absorb each value through the codec and write its canonical encoding.
+        // Absorb each value through the codec and write its wire encoding.
         let mut bound = Vec::with_capacity(values.len());
-        for v in values {
+        for value in values {
             // Sponge path: absorb the value in whichever shape the codec dictates.
-            Cdc::observe(&mut self.challenger, v);
-            // Wire path: write a canonical big-endian field encoding.
-            let bytes = encode_field_be::<F>(v);
+            Cdc::observe(&mut self.challenger, value);
+            // Wire path: write the codec-selected encoding.
+            let bytes = Cdc::encode(value);
             self.narg.extend_from_slice(&bytes);
             // Hand back a binding witness so callers can prove the value was threaded through.
-            bound.push(TranscriptBound::wrap(*v));
+            bound.push(TranscriptBound::wrap(value.clone()));
         }
         bound
+    }
+
+    /// Absorb a variable-length list of at most `max` scalars under a single step.
+    pub fn add_scalars_bounded<F, Cdc>(
+        &mut self,
+        label: Label,
+        values: &[F],
+        max: usize,
+    ) -> Vec<TranscriptBound<F>>
+    where
+        F: PrimeField,
+        C: CanObserve<u8>,
+        Cdc: Codec<C, F>,
+    {
+        self.add_messages_bounded::<F, Cdc>(label, values, max)
     }
 
     /// Absorb one extension-field element coefficient by coefficient.
     pub fn add_extension<F, EF, Cdc>(&mut self, label: Label, value: &EF) -> TranscriptBound<EF>
     where
         F: PrimeField,
-        EF: BasedVectorSpace<F> + Copy,
+        EF: BasedVectorSpace<F> + Clone,
         Cdc: Codec<C, F>,
     {
-        // Validate: the next pattern step is a scalar message of extension type.
-        self.player.interact(Interaction::new::<EF>(
-            Hierarchy::Atomic,
-            Kind::Message,
-            label,
-            Length::Scalar,
-        ));
-        // Each coefficient travels through the same codec and wire format as a scalar.
-        for coeff in value.as_basis_coefficients_slice() {
-            Cdc::observe(&mut self.challenger, coeff);
-            let bytes = encode_field_be::<F>(coeff);
-            self.narg.extend_from_slice(&bytes);
-        }
-        TranscriptBound::wrap(*value)
+        self.add_message::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, value)
     }
 
-    /// Append a hint to the wire buffer without absorbing it into the sponge.
+    /// Absorb a known-length list of extension-field elements coefficient by coefficient.
     ///
-    /// Hint bytes are part of the wire format but never enter the sponge,
+    /// No length prefix is written; the recorded pattern is the source of truth.
+    pub fn add_extensions<F, EF, Cdc>(
+        &mut self,
+        label: Label,
+        values: &[EF],
+    ) -> Vec<TranscriptBound<EF>>
+    where
+        F: PrimeField,
+        EF: BasedVectorSpace<F> + Clone,
+        Cdc: Codec<C, F>,
+    {
+        self.add_messages::<EF, ExtensionFieldCodec<F, EF, Cdc>>(label, values)
+    }
+
+    /// Append one typed hint to the wire buffer without absorbing it into the sponge.
+    ///
+    /// Hint values are part of the wire format but never enter the sponge,
     /// so they cannot influence sampled challenges.
-    pub fn add_hint(&mut self, label: Label, bytes: &[u8]) {
-        self.player.interact(Interaction::new::<u8>(
+    pub fn add_hint<T, Cdc>(&mut self, label: Label, value: &T)
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
-            Length::Fixed(bytes.len()),
+            Length::Scalar,
         ));
-        self.narg.extend_from_slice(bytes);
+        let bytes = Cdc::encode(value);
+        self.narg.extend_from_slice(&bytes);
     }
 
-    /// Append a variable-length hint of at most `max` bytes.
+    /// Append a known-length list of typed hints under a single pattern step.
+    ///
+    /// No hint is absorbed; the recorded pattern is the source of truth for length.
+    pub fn add_hints<T, Cdc>(&mut self, label: Label, values: &[T])
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        self.record_proof_object(Interaction::new::<T>(
+            Hierarchy::Atomic,
+            Kind::Hint,
+            label,
+            Length::Fixed(values.len()),
+        ));
+        for value in values {
+            let bytes = Cdc::encode(value);
+            self.narg.extend_from_slice(&bytes);
+        }
+    }
+
+    /// Append a variable-length list of at most `max` typed hints.
     ///
     /// # Wire format
     ///
     /// ```text
-    ///     [len in W bytes, big-endian][payload bytes]
+    ///     [len in W bytes, big-endian][codec encoding of each value]
     /// ```
-    ///
-    /// `W` is the minimum width that can encode `max`.
     ///
     /// # Sponge behaviour
     ///
-    /// Neither the length prefix nor the payload enter the sponge.
+    /// Neither the length prefix nor the values enter the sponge.
     ///
     /// This step cannot influence any later challenge.
     ///
     /// # Panics
     ///
-    /// When the supplied byte count exceeds `max`.
-    pub fn add_hint_bounded(&mut self, label: Label, bytes: &[u8], max: usize) {
-        // Caller bug: writing more than the cap would silently truncate on the verifier side.
+    /// When the supplied slice is longer than `max`.
+    pub fn add_hints_bounded<T, Cdc>(&mut self, label: Label, values: &[T], max: usize)
+    where
+        T: Clone,
+        Cdc: Codec<C, T>,
+    {
+        // Caller bug: writing more than the cap would diverge from the recorded pattern.
         assert!(
-            bytes.len() <= max,
+            values.len() <= max,
             "hint length {} exceeds declared maximum {max}",
-            bytes.len(),
+            values.len(),
         );
-        // Validate against the recorded pattern step so any shape divergence panics here.
-        self.player.interact(Interaction::new::<u8>(
+        self.record_proof_object(Interaction::new::<T>(
             Hierarchy::Atomic,
             Kind::Hint,
             label,
@@ -295,11 +391,14 @@ impl<C, U: Unit> ProverState<C, U> {
         ));
         // Prefix width is deterministic on both sides from the recorded bound.
         let width = bound_byte_width(max);
-        // Push the big-endian length onto the wire.
-        let len_bytes = encode_len_be(bytes.len(), width);
+        // Push the big-endian length onto the wire without absorbing it.
+        let len_bytes = encode_len_be(values.len(), width);
         self.narg.extend_from_slice(&len_bytes[..width]);
-        // Payload follows the prefix verbatim — never absorbed into the sponge.
-        self.narg.extend_from_slice(bytes);
+        // Values follow the prefix through the codec — never absorbed into the sponge.
+        for value in values {
+            let bytes = Cdc::encode(value);
+            self.narg.extend_from_slice(&bytes);
+        }
     }
 
     /// Sample one challenge scalar of type `F` via codec `Cdc`.
@@ -358,8 +457,7 @@ impl<C, U: Unit> ProverState<C, U> {
         C: GrindingChallenger,
         <C as GrindingChallenger>::Witness: PrimeField,
     {
-        // Validate: the next pattern step is a proof-of-work step.
-        self.player.interact(Interaction::new::<u64>(
+        self.record_proof_object(Interaction::new::<u64>(
             Hierarchy::Atomic,
             Kind::Pow,
             "pow",
@@ -405,15 +503,48 @@ mod tests {
     use p3_baby_bear::BabyBear;
     use p3_field::{PrimeCharacteristicRing, PrimeField32};
 
-    use crate::fs::TranscriptBound;
     use crate::fs::codecs::BytesToFieldCodec;
     use crate::fs::domain_separator::DomainSeparator;
     use crate::fs::pattern::{Hierarchy, Interaction, InteractionPattern, Kind, Length};
     use crate::fs::shake128::Shake128;
     use crate::fs::state::{ProverState, VerifierState};
+    use crate::fs::{Codec, TranscriptBound, TranscriptError};
+    use crate::{CanObserve, CanSample};
 
     /// Concrete field exercised in this module's tests.
     type F = BabyBear;
+
+    /// Identity byte codec.
+    struct ByteCodec;
+
+    impl Codec<Shake128, u8> for ByteCodec {
+        const SECURITY_BITS: u32 = 8;
+
+        fn observe(challenger: &mut Shake128, value: &u8) {
+            challenger.observe(*value);
+        }
+
+        fn sample(challenger: &mut Shake128) -> u8 {
+            challenger.sample()
+        }
+
+        fn byte_len() -> usize {
+            1
+        }
+
+        fn encode(value: &u8) -> Vec<u8> {
+            alloc::vec![*value]
+        }
+
+        fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+            match bytes {
+                [value] => Ok(*value),
+                _ => Err(TranscriptError::BadProofShape {
+                    reason: "byte encoding must contain exactly one byte",
+                }),
+            }
+        }
+    }
 
     /// Three messages followed by two challenges, each as one fixed-length step.
     fn small_pattern() -> InteractionPattern {
@@ -551,7 +682,7 @@ mod tests {
         // Helper: run a prover with the given hint bytes and return (bound challenge, wire).
         let drive_with_hint = |hint: &[u8; 4]| -> (TranscriptBound<F>, Vec<u8>) {
             let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
-            p.add_hint("merkle-path", hint);
+            p.add_hints::<_, ByteCodec>("merkle-path", hint);
             let c = p.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
             (c, p.finalize())
         };
@@ -597,20 +728,62 @@ mod tests {
 
         // Mutation (prover): send 3 bytes — strictly less than the cap — then sample a challenge.
         let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
-        p.add_hint_bounded("auth-path", &[0xaa, 0xbb, 0xcc], 8);
+        p.add_hints_bounded::<u8, ByteCodec>("auth-path", &[0xaa, 0xbb, 0xcc], 8);
         let c_p = p.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
         let narg = p.finalize();
 
         // Mutation (verifier): replay the same step, read the actual byte count, sample a challenge.
         let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
-        let read_hint = v.next_hint_bounded("auth-path", 8).expect("legal hint");
+        let read_hint = v
+            .next_hints_bounded::<u8, ByteCodec>("auth-path", 8)
+            .expect("legal hint");
         let c_v = v.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
         v.finalize().expect("NARG fully consumed");
 
         // Property 1: payload round-trips byte-for-byte.
-        assert_eq!(read_hint, &[0xaa, 0xbb, 0xcc]);
+        assert_eq!(read_hint, [0xaa, 0xbb, 0xcc]);
 
         // Property 2: hint payload is not absorbed, so both sides derive the same challenge.
+        assert_eq!(c_p, c_v);
+    }
+
+    #[test]
+    fn bounded_typed_hints_round_trip() {
+        // Invariant: a bounded typed hint decodes through its codec, but never enters the sponge.
+
+        // Fixture state: field hint slice with cap 5 followed by one challenge.
+        let pattern = InteractionPattern::new(alloc::vec![
+            Interaction::new::<F>(
+                Hierarchy::Atomic,
+                Kind::Hint,
+                "typed-auth",
+                Length::Bounded(5),
+            ),
+            Interaction::new::<F>(Hierarchy::Atomic, Kind::Challenge, "alpha", Length::Scalar,),
+        ])
+        .unwrap();
+        let mut ds: DomainSeparator<u8> = DomainSeparator::new(0, b"bounded-typed-hint", pattern);
+        ds.bind_pattern_hash();
+
+        // Mutation (prover): send 3 field elements, strictly below the cap of 5.
+        let hints: alloc::vec::Vec<F> = (7u32..=9).map(F::from_u32).collect();
+        let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
+        p.add_hints_bounded::<F, BytesToFieldCodec<F>>("typed-auth", &hints, 5);
+        let c_p = p.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
+        let narg = p.finalize();
+
+        // Mutation (verifier): replay the typed hint and sample the matching challenge.
+        let mut v = VerifierState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds, &narg);
+        let read = v
+            .next_hints_bounded::<F, BytesToFieldCodec<F>>("typed-auth", 5)
+            .expect("legal typed hint");
+        let c_v = v.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
+        v.finalize().expect("NARG fully consumed");
+
+        // Property 1: values round-trip through the codec.
+        assert_eq!(read, hints);
+
+        // Property 2: typed hints are not absorbed, so both sides derive the same challenge.
         assert_eq!(c_p, c_v);
     }
 
@@ -637,7 +810,7 @@ mod tests {
         // Helper: drive a prover with the supplied hint and return the sampled challenge.
         let drive = |hint: &[u8]| -> TranscriptBound<F> {
             let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
-            p.add_hint_bounded("auth-path", hint, 8);
+            p.add_hints_bounded::<u8, ByteCodec>("auth-path", hint, 8);
             let c = p.challenge_scalar::<F, BytesToFieldCodec<F>>("alpha");
             let _ = p.finalize();
             c
@@ -777,7 +950,7 @@ mod tests {
 
         // Mutation: feed 5 bytes into a cap of 4.
         let mut p = ProverState::<_, u8>::new(Shake128::new(&[0u8; 64]), &ds);
-        p.add_hint_bounded("auth", &[0u8; 5], 4);
+        p.add_hints_bounded::<u8, ByteCodec>("auth", &[0u8; 5], 4);
 
         // Drain the player so dropping the prover during the panic does not double-panic.
         let _ = p.finalize();

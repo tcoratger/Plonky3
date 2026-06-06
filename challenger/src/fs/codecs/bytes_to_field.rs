@@ -5,9 +5,11 @@ use core::marker::PhantomData;
 
 use p3_field::PrimeField;
 
+use crate::fs::TranscriptError;
 use crate::fs::codecs::Codec;
 use crate::fs::codecs::decode_field::{
-    decode_field_via_extra_bytes, field_byte_size, required_bytes,
+    decode_field_be_canonical, decode_field_via_extra_bytes, encode_field_be, field_byte_size,
+    required_bytes,
 };
 use crate::{CanObserve, CanSample};
 
@@ -49,6 +51,18 @@ where
             bytes.push(challenger.sample());
         }
         decode_field_via_extra_bytes::<F>(&bytes)
+    }
+
+    fn byte_len() -> usize {
+        field_byte_size::<F>()
+    }
+
+    fn encode(value: &F) -> Vec<u8> {
+        encode_field_be(value)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<F, TranscriptError> {
+        decode_field_be_canonical(bytes)
     }
 }
 

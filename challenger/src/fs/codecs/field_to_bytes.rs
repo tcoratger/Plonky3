@@ -1,10 +1,12 @@
 //! Field-sponge to byte codec.
 
+use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use p3_field::{PrimeField32, PrimeField64};
 
+use crate::fs::TranscriptError;
 use crate::fs::codecs::Codec;
 use crate::{CanObserve, CanSample};
 
@@ -34,6 +36,23 @@ where
         let f: F = challenger.sample();
         f.as_canonical_u32() as u8
     }
+
+    fn byte_len() -> usize {
+        1
+    }
+
+    fn encode(value: &u8) -> Vec<u8> {
+        vec![*value]
+    }
+
+    fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+        bytes
+            .first()
+            .copied()
+            .ok_or(TranscriptError::BadProofShape {
+                reason: "not enough bytes for a byte encoding",
+            })
+    }
 }
 
 /// Same construction as the 32-bit variant, for 64-bit prime fields.
@@ -56,6 +75,23 @@ where
     fn sample(challenger: &mut C) -> u8 {
         let f: F = challenger.sample();
         f.as_canonical_u64() as u8
+    }
+
+    fn byte_len() -> usize {
+        1
+    }
+
+    fn encode(value: &u8) -> Vec<u8> {
+        vec![*value]
+    }
+
+    fn decode(bytes: &[u8]) -> Result<u8, TranscriptError> {
+        bytes
+            .first()
+            .copied()
+            .ok_or(TranscriptError::BadProofShape {
+                reason: "not enough bytes for a byte encoding",
+            })
     }
 }
 
