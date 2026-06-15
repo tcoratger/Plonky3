@@ -305,31 +305,54 @@ fn calculate_accumulator_3<EF: Field>(eq0: &[EF; 8], reduced: &[EF; 8]) -> [Vec<
 
 /// General accumulator computation for l >= 4.
 ///
-/// Allocates `{0, 1, inf}^l` buffers and runs the staged grid expansion.
+/// The full `{0, 1, inf}^l` grid orders `x_0` as the slowest coordinate, so its
+/// first third fixes `x_0` to `0` and its last third fixes `x_0` to `inf`,
+/// while the discarded middle third fixes `x_0` to `1`.
+///
+/// In the input table `idx = x_0 + 2 x_1 + \dots`, `x_0` is the fastest bit:
+/// fixing `x_0 = 0` selects the even entries and the slope `x_0 = inf` is the
+/// stride-`2` difference, each a multilinear in the remaining `l - 1` variables.
+/// Expanding only these two `2^{l-1}`-entry restrictions onto their own
+/// `3^{l-1}` grids reproduces the two read-out thirds without materializing the
+/// unused middle face.
 fn calculate_accumulator_general<F: Field, EF: ExtensionField<F>>(
     l: usize,
     eq0: &[EF],
     reduced_evals: &[EF],
 ) -> [Vec<EF>; 2] {
-    let grid_len = 3usize.pow(l as u32);
-    let mut eq0_grid = EF::zero_vec(grid_len);
-    let mut reduced_grid = EF::zero_vec(grid_len);
-    let mut scratch = EF::zero_vec(grid_len);
-
-    evals_01inf_grid_into(eq0, &mut eq0_grid, &mut scratch);
-    evals_01inf_grid_into(reduced_evals, &mut reduced_grid, &mut scratch);
-
+    let half = 1usize << (l - 1);
     let stride = 3usize.pow((l - 1) as u32);
-    let acc0 = eq0_grid[..stride]
+
+    // `x_0 = 0` restriction: the even-indexed entries.
+    let eq0_face0: Vec<EF> = eq0.iter().step_by(2).copied().collect();
+    let reduced_face0: Vec<EF> = reduced_evals.iter().step_by(2).copied().collect();
+
+    // `x_0 = inf` restriction: the slope `f(.., 1, ..) - f(.., 0, ..)`.
+    let eq0_face_inf: Vec<EF> = (0..half).map(|i| eq0[2 * i + 1] - eq0[2 * i]).collect();
+    let reduced_face_inf: Vec<EF> = (0..half)
+        .map(|i| reduced_evals[2 * i + 1] - reduced_evals[2 * i])
+        .collect();
+
+    // Each face expands to its own `3^{l-1}` grid; reuse one scratch buffer.
+    let mut eq0_grid = EF::zero_vec(stride);
+    let mut reduced_grid = EF::zero_vec(stride);
+    let mut scratch = EF::zero_vec(stride);
+
+    evals_01inf_grid_into(&eq0_face0, &mut eq0_grid, &mut scratch);
+    evals_01inf_grid_into(&reduced_face0, &mut reduced_grid, &mut scratch);
+    let acc0 = eq0_grid
         .iter()
         .copied()
-        .zip(reduced_grid[..stride].iter().copied())
+        .zip(reduced_grid.iter().copied())
         .map(|(eq, eval)| eq * eval)
         .collect();
-    let acc_inf = eq0_grid[2 * stride..]
+
+    evals_01inf_grid_into(&eq0_face_inf, &mut eq0_grid, &mut scratch);
+    evals_01inf_grid_into(&reduced_face_inf, &mut reduced_grid, &mut scratch);
+    let acc_inf = eq0_grid
         .iter()
         .copied()
-        .zip(reduced_grid[2 * stride..].iter().copied())
+        .zip(reduced_grid.iter().copied())
         .map(|(eq, eval)| eq * eval)
         .collect();
 
@@ -626,6 +649,44 @@ mod test {
             let general = calculate_accumulator_general::<F, EF>(3, &eq0, &reduced);
 
             prop_assert_eq!(fast, general);
+        }
+
+        /// Verify the two-face general path reproduces the full-grid thirds.
+        #[test]
+        fn prop_accumulators_general_matches_full_grid(l in 1usize..=6, seed in 0u64..200) {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            // Both inputs are multilinear tables over l Boolean coordinates.
+            let n = 1usize << l;
+            let eq0: Vec<EF> = (0..n).map(|_| rng.random()).collect();
+            let reduced: Vec<EF> = (0..n).map(|_| rng.random()).collect();
+
+            // Reference: expand both tables onto the full {0, 1, inf}^l grid,
+            // then read the first third (x_0 = 0) and last third (x_0 = inf).
+            let grid_len = 3usize.pow(l as u32);
+            let mut eq0_grid = EF::zero_vec(grid_len);
+            let mut reduced_grid = EF::zero_vec(grid_len);
+            let mut scratch = EF::zero_vec(grid_len);
+            evals_01inf_grid_into(&eq0, &mut eq0_grid, &mut scratch);
+            evals_01inf_grid_into(&reduced, &mut reduced_grid, &mut scratch);
+
+            let stride = 3usize.pow((l - 1) as u32);
+            // First third: leading coordinate fixed to 0.
+            let ref_acc0: Vec<EF> = eq0_grid[..stride]
+                .iter()
+                .zip(reduced_grid[..stride].iter())
+                .map(|(&eq, &eval)| eq * eval)
+                .collect();
+            // Last third: leading coordinate fixed to inf.
+            let ref_acc_inf: Vec<EF> = eq0_grid[2 * stride..]
+                .iter()
+                .zip(reduced_grid[2 * stride..].iter())
+                .map(|(&eq, &eval)| eq * eval)
+                .collect();
+
+            // The two-face path must match both thirds exactly.
+            let [acc0, acc_inf] = calculate_accumulator_general::<F, EF>(l, &eq0, &reduced);
+            prop_assert_eq!(acc0, ref_acc0);
+            prop_assert_eq!(acc_inf, ref_acc_inf);
         }
     }
 }
