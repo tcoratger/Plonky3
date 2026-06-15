@@ -23,5 +23,8 @@ mod point;
 pub(crate) use accumulator::{
     SvoAccumulators, calculate_accumulators_batch, calculate_product_accumulator,
 };
+// The full-grid form is retained only as a test oracle for the two-face producer.
+#[cfg(test)]
 pub(crate) use grid::evals_01inf_grid_prefix;
+pub(crate) use grid::evals_01inf_grid_prefix_faces;
 pub use point::SvoPoint;

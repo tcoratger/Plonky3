@@ -193,6 +193,51 @@ pub(crate) fn evals_01inf_grid_prefix<F: Field>(evals: &[F]) -> Vec<F> {
     out
 }
 
+/// Build only the two ternary faces of the leading coordinate that the SVO
+/// accumulators read: the `0`-face, then the `inf`-face.
+///
+/// The accumulators fix the leading prefix coordinate to `0` or `inf` and never
+/// read the `1`-face, so the full `3^l` grid wastes a third of its work.
+///
+/// # Algorithm
+///
+/// - The leading prefix coordinate is the highest input bit.
+/// - Fixing it to `0` leaves the low half of the evaluations.
+/// - Fixing it to `inf` leaves the leading-variable slope `f(1) - f(0)`.
+/// - Each face is then the full ternary grid of an `(l-1)`-variable restriction.
+///
+/// ```text
+///     faces = [ grid(low_half) | grid(high_half - low_half) ]
+/// ```
+///
+/// # Returns
+///
+/// - `2 * 3^(l-1)` values: the `0`-face followed by the `inf`-face.
+/// - Each face has length `3^(l-1)` and is laid out exactly like the
+///   corresponding third of `evals_01inf_grid_prefix`.
+///
+/// # Panics
+///
+/// - Input length is not a power of two.
+/// - Input has zero variables, so there is no leading coordinate to fix.
+pub(crate) fn evals_01inf_grid_prefix_faces<F: Field>(evals: &[F]) -> Vec<F> {
+    let l = log2_strict_usize(evals.len());
+    assert!(
+        l >= 1,
+        "a leading coordinate requires at least one variable"
+    );
+
+    // The leading prefix coordinate is the highest input bit.
+    // Its `0`-face is the low half; its `inf`-face is the slope across the halves.
+    let (low, high) = evals.split_at(evals.len() / 2);
+    let slope: Vec<F> = high.iter().zip(low).map(|(&h, &l)| h - l).collect();
+
+    // Each face is the full `(l-1)`-variable grid in prefix order.
+    let mut faces = evals_01inf_grid_prefix(low);
+    faces.extend(evals_01inf_grid_prefix(&slope));
+    faces
+}
+
 #[cfg(test)]
 mod test {
     use alloc::vec;
@@ -556,6 +601,27 @@ mod test {
 
                 prop_assert_eq!(grid[ternary_idx], input_val);
             }
+        }
+
+        /// Verify the two-face producer equals the `0`-face and `inf`-face of the full grid.
+        #[test]
+        fn prop_grid_prefix_faces_match_full(num_variables in 1usize..=6) {
+            // Fixture state: a random multilinear over `num_variables` variables.
+            let mut rng = SmallRng::seed_from_u64(num_variables as u64 + 2000);
+            let evals: Vec<EF> = (0..1 << num_variables).map(|_| rng.random()).collect();
+
+            // The full grid's thirds are the leading coordinate fixed to 0 / 1 / inf.
+            //     stride = 3^(l-1) is the size of one face.
+            let stride = 3usize.pow((num_variables - 1) as u32);
+            let full = evals_01inf_grid_prefix(&evals);
+
+            // The two-face producer must reproduce the 0-face then the inf-face.
+            //     full[..stride]        is the 0-face
+            //     full[2*stride..]      is the inf-face
+            let mut expected = full[..stride].to_vec();
+            expected.extend_from_slice(&full[2 * stride..]);
+
+            prop_assert_eq!(evals_01inf_grid_prefix_faces(&evals), expected);
         }
     }
 }
