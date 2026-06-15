@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use p3_field::{ExtensionField, Field};
 
-use super::grid::evals_01inf_grid_into;
+use super::grid::{evals_01inf_grid_into, fold_grid_thirds};
 use crate::layout::{EqPartials, NextPartials, ProverMultiClaim};
 use crate::strategy::VariableOrder;
 
@@ -320,18 +320,14 @@ fn calculate_accumulator_general<F: Field, EF: ExtensionField<F>>(
     evals_01inf_grid_into(reduced_evals, &mut reduced_grid, &mut scratch);
 
     let stride = 3usize.pow((l - 1) as u32);
-    let acc0 = eq0_grid[..stride]
-        .iter()
-        .copied()
-        .zip(reduced_grid[..stride].iter().copied())
-        .map(|(eq, eval)| eq * eval)
-        .collect();
-    let acc_inf = eq0_grid[2 * stride..]
-        .iter()
-        .copied()
-        .zip(reduced_grid[2 * stride..].iter().copied())
-        .map(|(eq, eval)| eq * eval)
-        .collect();
+    let mut acc0 = EF::zero_vec(stride);
+    let mut acc_inf = EF::zero_vec(stride);
+    fold_grid_thirds(
+        &[(&eq0_grid, &reduced_grid)],
+        stride,
+        &mut acc0,
+        &mut acc_inf,
+    );
 
     [acc0, acc_inf]
 }

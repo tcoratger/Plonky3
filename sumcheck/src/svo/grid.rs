@@ -193,6 +193,41 @@ pub(crate) fn evals_01inf_grid_prefix<F: Field>(evals: &[F]) -> Vec<F> {
     out
 }
 
+/// Fold the `0`-face and `inf`-face of one or more ternary grids into running accumulators.
+///
+/// Each pair is a `(weight, data)` grid laid out on `{0, 1, inf}^l`, where the leading
+/// coordinate is the slowest-varying one.
+/// Fixing that coordinate to `0` selects the first third `[..stride]` of the grid, and
+/// fixing it to `inf` selects the last third `[2 * stride..]`.
+/// For every position in a third this adds the sum over all pairs of `weight[i] * data[i]`
+/// into the matching accumulator entry, so `acc0` collects the `0`-face contributions and
+/// `acc_inf` collects the `inf`-face contributions.
+///
+/// # Arguments
+///
+/// - `pairs`: the `(weight, data)` grid slices to fold, each of length `3^l`.
+/// - `stride`: the number of rows in one grid third, equal to `3^(l - 1)`.
+/// - `acc0`: running accumulator for the `0`-face, of length `stride`.
+/// - `acc_inf`: running accumulator for the `inf`-face, of length `stride`.
+pub(crate) fn fold_grid_thirds<F: Field>(
+    pairs: &[(&[F], &[F])],
+    stride: usize,
+    acc0: &mut [F],
+    acc_inf: &mut [F],
+) {
+    for &(weight, data) in pairs {
+        // The first third fixes the leading coordinate to 0.
+        acc0.iter_mut()
+            .zip(weight[..stride].iter().zip(data[..stride].iter()))
+            .for_each(|(out, (&w, &d))| *out += w * d);
+        // The last third fixes the leading coordinate to inf (its leading coefficient).
+        acc_inf
+            .iter_mut()
+            .zip(weight[2 * stride..].iter().zip(data[2 * stride..].iter()))
+            .for_each(|(out, (&w, &d))| *out += w * d);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use alloc::vec;
