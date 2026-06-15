@@ -634,7 +634,8 @@ impl<F: Field, EF: ExtensionField<F>> SvoPoint<F, EF> {
         // Suffix layout puts the folded prefix in the high bits of the index.
         let (p_rest, _p_active) = self.z_svo.split_at(rest_len);
         // Equality table over the prefix used to contract it away.
-        let rest_eq = SplitEq::<EF, EF>::new_packed(&p_rest, EF::ONE);
+        // The EF,EF table here is tiny, so the unpacked form skips the packing machinery for the same compression result.
+        let rest_eq = SplitEq::<EF, EF>::new_unpacked(&p_rest, EF::ONE);
 
         // Done state: contract the equality payload over the prefix at the matching active row.
         let done = rest_eq.compress_prefix(d_eq);
@@ -715,7 +716,8 @@ impl<F: Field, EF: ExtensionField<F>> SvoPoint<F, EF> {
         // Prefix layout puts the folded suffix in the low bits of the index.
         let (_p_active, p_rest) = self.z_svo.split_at(active_len);
         // Equality table over the suffix used to contract it away.
-        let rest_eq = SplitEq::<EF, EF>::new_packed(&p_rest, EF::ONE);
+        // The EF,EF table here is tiny, so the unpacked form skips the packing machinery for the same compression result.
+        let rest_eq = SplitEq::<EF, EF>::new_unpacked(&p_rest, EF::ONE);
 
         // Done state: contract the shifted-done payload over the suffix.
         let mut done = rest_eq.compress_suffix(d_done);
