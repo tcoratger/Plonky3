@@ -189,22 +189,30 @@ pub struct Witness<F: Field> {
 }
 
 impl<F: Field> Witness<F> {
-    /// Stacks the given tables into a single committed polynomial.
+    /// Performs the shared construction setup for both stacking layouts.
     ///
-    /// # Algorithm
+    /// Normalizes the source tables to the preprocessing depth.
+    /// Delegates slot assignment to the shared planner.
+    /// Allocates the zeroed stacked buffer.
     ///
-    /// - Sort tables by arity ascending; reverse-iterate to place largest first.
-    /// - Each column occupies one slot of size `2^arity`.
-    /// - Selector bit-width equals the stacked arity minus the table arity.
-    /// - Total stacked size is rounded up to the next power of two.
-    /// - Unused tail entries stay zero.
+    /// # Arguments
+    ///
+    /// - `tables`: source tables, padded in place to at least `folding` variables.
+    /// - `folding`: preprocessing depth used to normalize small tables.
+    ///
+    /// # Returns
+    ///
+    /// - The stacked arity.
+    /// - The per-table placements assigned by the planner.
+    /// - The zeroed stacked polynomial.
     ///
     /// # Panics
     ///
     /// - Table list must be non-empty.
-    /// - Tables below the preprocessing depth are zero-padded to that depth.
-    #[tracing::instrument(skip_all)]
-    pub fn new(mut tables: Vec<Table<F>>, folding: usize) -> Self {
+    fn plan_and_allocate(
+        tables: &mut [Table<F>],
+        folding: usize,
+    ) -> (usize, Vec<TablePlacement>, Poly<F>) {
         // Precondition: need at least one source table to stack.
         assert!(
             !tables.is_empty(),
@@ -224,7 +232,29 @@ impl<F: Field> Witness<F> {
         let (num_variables, placements) = plan_layout(&shapes);
 
         // Stacked buffer starts zero; unused tail entries stay zero.
-        let mut stacked = Poly::<F>::zero(num_variables);
+        let stacked = Poly::<F>::zero(num_variables);
+
+        (num_variables, placements, stacked)
+    }
+
+    /// Stacks the given tables into a single committed polynomial.
+    ///
+    /// # Algorithm
+    ///
+    /// - Sort tables by arity ascending; reverse-iterate to place largest first.
+    /// - Each column occupies one slot of size `2^arity`.
+    /// - Selector bit-width equals the stacked arity minus the table arity.
+    /// - Total stacked size is rounded up to the next power of two.
+    /// - Unused tail entries stay zero.
+    ///
+    /// # Panics
+    ///
+    /// - Table list must be non-empty.
+    /// - Tables below the preprocessing depth are zero-padded to that depth.
+    #[tracing::instrument(skip_all)]
+    pub fn new(mut tables: Vec<Table<F>>, folding: usize) -> Self {
+        let (num_variables, placements, mut stacked) =
+            Self::plan_and_allocate(&mut tables, folding);
 
         // Copy each source column into its planner-assigned slot.
         for placement in &placements {
@@ -272,25 +302,13 @@ impl<F: Field> Witness<F> {
     /// - Tables below the preprocessing depth are zero-padded to that depth.
     #[tracing::instrument(skip_all)]
     pub fn new_interleaved(mut tables: Vec<Table<F>>, folding: usize) -> Self {
-        assert!(
-            !tables.is_empty(),
-            "Witness requires at least one source table"
-        );
-        tables.iter_mut().for_each(|table| table.pad_zeros(folding));
+        let (num_variables, mut placements, mut stacked) =
+            Self::plan_and_allocate(&mut tables, folding);
 
-        let shapes: Vec<LayoutShape> = tables
-            .iter()
-            .map(|t| LayoutShape {
-                arity: t.num_variables(),
-                width: t.num_polys(),
-            })
-            .collect();
-        let (num_variables, mut placements) = plan_layout(&shapes);
+        // Reverse prefix-oriented selector codes so suffix stacking stays disjoint.
         placements
             .iter_mut()
             .for_each(TablePlacement::reverse_selectors);
-
-        let mut stacked = Poly::<F>::zero(num_variables);
 
         for placement in &placements {
             let table = &tables[placement.idx()];
