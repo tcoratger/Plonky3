@@ -8,7 +8,7 @@ use p3_multilinear_util::poly::Poly;
 
 use crate::Claim;
 use crate::svo::{
-    SvoAccumulators, SvoPoint, calculate_product_accumulator, evals_01inf_grid_prefix,
+    SvoAccumulators, SvoPoint, calculate_product_accumulator, evals_01inf_grid_prefix_faces,
 };
 
 /// Multi-opening claim over an SVO point.
@@ -152,23 +152,20 @@ impl<EF: Field> EqPartials<EF> {
         assert_eq!(acc0.len(), stride);
         assert_eq!(acc_inf.len(), stride);
 
-        // Expand the equality weight from the 2^l hypercube to the 3^l ternary grid.
-        let eq_grid = evals_01inf_grid_prefix(Poly::new_from_point(p_active, EF::ONE).as_slice());
-        // Expand the cached payload to the same ternary grid.
-        let acc_grid = evals_01inf_grid_prefix(self.poly().as_slice());
+        // Build only the 0-face and inf-face of each grid; the 1-face is never read.
+        //     faces layout: [ 0-face (stride) | inf-face (stride) ]
+        let eq_grid =
+            evals_01inf_grid_prefix_faces(Poly::new_from_point(p_active, EF::ONE).as_slice());
+        let acc_grid = evals_01inf_grid_prefix_faces(self.poly().as_slice());
 
-        // The first third of the grid fixes the leading active coordinate to 0.
+        // The 0-face fixes the leading active coordinate to 0.
         acc0.iter_mut()
             .zip(eq_grid[..stride].iter().zip(acc_grid[..stride].iter()))
             .for_each(|(out, (&eq, &eval))| *out += eq * eval);
-        // The last third fixes the leading active coordinate to inf (its leading coefficient).
+        // The inf-face fixes the leading active coordinate to inf (its leading coefficient).
         acc_inf
             .iter_mut()
-            .zip(
-                eq_grid[2 * stride..]
-                    .iter()
-                    .zip(acc_grid[2 * stride..].iter()),
-            )
+            .zip(eq_grid[stride..].iter().zip(acc_grid[stride..].iter()))
             .for_each(|(out, (&eq, &eval))| *out += eq * eval);
     }
 }
@@ -353,15 +350,16 @@ impl<EF: Field> NextPartials<EF> {
         // TODO: carry and omega polys are sparse.
         let active = Self::from_point(p_active);
 
-        // Expand every state and data table from the hypercube to the ternary grid.
-        let carry_grid = evals_01inf_grid_prefix(active.carry().as_slice());
-        let done_grid = evals_01inf_grid_prefix(active.done().as_slice());
-        let omega_grid = evals_01inf_grid_prefix(active.omega().as_slice());
-        let done_data_grid = evals_01inf_grid_prefix(self.done().as_slice());
-        let carry_data_grid = evals_01inf_grid_prefix(self.carry().as_slice());
-        let omega_data_grid = evals_01inf_grid_prefix(self.omega().as_slice());
+        // Build only the 0-face and inf-face of each state and data table.
+        //     faces layout: [ 0-face (stride) | inf-face (stride) ]; the 1-face is never read.
+        let carry_grid = evals_01inf_grid_prefix_faces(active.carry().as_slice());
+        let done_grid = evals_01inf_grid_prefix_faces(active.done().as_slice());
+        let omega_grid = evals_01inf_grid_prefix_faces(active.omega().as_slice());
+        let done_data_grid = evals_01inf_grid_prefix_faces(self.done().as_slice());
+        let carry_data_grid = evals_01inf_grid_prefix_faces(self.carry().as_slice());
+        let omega_data_grid = evals_01inf_grid_prefix_faces(self.omega().as_slice());
 
-        // First grid third: leading active coordinate fixed to 0; sum the three state-data products.
+        // 0-face: leading active coordinate fixed to 0; sum the three state-data products.
         acc0.iter_mut()
             .zip(
                 done_grid[..stride]
@@ -384,23 +382,23 @@ impl<EF: Field> NextPartials<EF> {
                 },
             );
 
-        // Last grid third: leading active coordinate fixed to inf; same three-term product.
+        // inf-face: leading active coordinate fixed to inf; same three-term product.
         acc_inf
             .iter_mut()
             .zip(
-                done_grid[2 * stride..]
+                done_grid[stride..]
                     .iter()
-                    .zip(done_data_grid[2 * stride..].iter()),
+                    .zip(done_data_grid[stride..].iter()),
             )
             .zip(
-                carry_grid[2 * stride..]
+                carry_grid[stride..]
                     .iter()
-                    .zip(carry_data_grid[2 * stride..].iter()),
+                    .zip(carry_data_grid[stride..].iter()),
             )
             .zip(
-                omega_grid[2 * stride..]
+                omega_grid[stride..]
                     .iter()
-                    .zip(omega_data_grid[2 * stride..].iter()),
+                    .zip(omega_data_grid[stride..].iter()),
             )
             .for_each(
                 |(((out, (&done, &done_data)), (&carry, &carry_data)), (&omega, &omega_data))| {
