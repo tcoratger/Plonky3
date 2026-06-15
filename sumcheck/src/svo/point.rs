@@ -125,28 +125,65 @@ impl<F: Field, EF: ExtensionField<F>> SvoPoint<F, EF> {
     /// polynomial only in the SVO variables, which is then:
     /// - evaluated at `z_svo` to obtain the opening value
     /// - partially compressed after each SVO round to feed the accumulator path
+    ///
+    /// # Incremental folding
+    ///
+    /// The round-`active_len` partial is the SVO-only polynomial with all but its
+    /// first (prefix layout) or last (suffix layout) `active_len` variables fixed
+    /// at the matching `z_svo` coordinates.
+    /// Round `active_len - 1` fixes exactly one more SVO variable than round
+    /// `active_len`, so its partial is obtained from the latter by a single
+    /// fix-one-variable fold:
+    /// ```text
+    /// partial(active_len - 1) = fix(partial(active_len), z_svo coordinate)
+    /// ```
+    /// Folding down from `active_len = l_0` (the uncompressed SVO polynomial) costs
+    /// $O(2^{l_0})$ total, versus $O(l_0 \cdot 2^{l_0})$ for recompressing each round
+    /// from scratch.
     pub fn eval(&self, poly: &Poly<F>) -> (EF, EqSvoPartials<EF>) {
         assert_eq!(self.num_variables(), poly.num_variables());
+        let l0 = self.num_variables_svo();
         let (compressed, partial_evals) = match self.var_order {
             VariableOrder::Prefix => {
                 let compressed = self.z_split.compress_suffix(poly);
-                let partial_evals = (1..=self.num_variables_svo())
-                    .map(|i| {
-                        let (_svo_active, svo_rest) = self.z_svo.split_at(i);
-                        compressed.compress_suffix(&svo_rest, EF::ONE)
-                    })
-                    .collect::<Vec<_>>();
+                // Round `active_len` keeps the first `active_len` SVO variables and
+                // fixes the suffix `z_svo[active_len..]`.
+                // Descending by one round fixes `z_svo[active_len - 1]` as the new
+                // innermost suffix variable, which `compress_suffix` over a length-one
+                // point performs exactly via `fix_suffix_var`.
+                let mut partial_evals = Vec::with_capacity(l0);
+                if l0 > 0 {
+                    partial_evals.push(compressed.clone());
+                    for active_len in (1..l0).rev() {
+                        let folded = partial_evals
+                            .last()
+                            .unwrap()
+                            .fix_suffix_var(self.z_svo.as_slice()[active_len]);
+                        partial_evals.push(folded);
+                    }
+                    partial_evals.reverse();
+                }
                 (compressed, partial_evals)
             }
             VariableOrder::Suffix => {
                 let compressed = self.z_split.compress_prefix(poly);
-                let partial_evals = (1..=self.num_variables_svo())
-                    .map(|i| {
-                        let (svo_rest, _svo_active) =
-                            self.z_svo.split_at(self.z_svo.num_variables() - i);
-                        compressed.compress_prefix(&svo_rest, EF::ONE)
-                    })
-                    .collect::<Vec<_>>();
+                // Round `active_len` keeps the last `active_len` SVO variables and
+                // fixes the prefix `z_svo[..l0 - active_len]`.
+                // Descending by one round fixes `z_svo[l0 - active_len - 1]` as the new
+                // innermost prefix variable, which `compress_prefix` over a length-one
+                // point performs exactly via `fix_prefix_var`.
+                let mut partial_evals = Vec::with_capacity(l0);
+                if l0 > 0 {
+                    partial_evals.push(compressed.clone());
+                    for active_len in (1..l0).rev() {
+                        let folded = partial_evals
+                            .last()
+                            .unwrap()
+                            .fix_prefix_var(self.z_svo.as_slice()[l0 - active_len - 1]);
+                        partial_evals.push(folded);
+                    }
+                    partial_evals.reverse();
+                }
                 (compressed, partial_evals)
             }
         };
