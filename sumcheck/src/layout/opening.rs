@@ -9,6 +9,7 @@ use p3_multilinear_util::poly::Poly;
 use crate::Claim;
 use crate::svo::{
     SvoAccumulators, SvoPoint, calculate_product_accumulator, evals_01inf_grid_prefix,
+    fold_grid_thirds,
 };
 
 /// Multi-opening claim over an SVO point.
@@ -157,19 +158,8 @@ impl<EF: Field> EqPartials<EF> {
         // Expand the cached payload to the same ternary grid.
         let acc_grid = evals_01inf_grid_prefix(self.poly().as_slice());
 
-        // The first third of the grid fixes the leading active coordinate to 0.
-        acc0.iter_mut()
-            .zip(eq_grid[..stride].iter().zip(acc_grid[..stride].iter()))
-            .for_each(|(out, (&eq, &eval))| *out += eq * eval);
-        // The last third fixes the leading active coordinate to inf (its leading coefficient).
-        acc_inf
-            .iter_mut()
-            .zip(
-                eq_grid[2 * stride..]
-                    .iter()
-                    .zip(acc_grid[2 * stride..].iter()),
-            )
-            .for_each(|(out, (&eq, &eval))| *out += eq * eval);
+        // Fold the single equality-weight times payload term over the 0 and inf thirds.
+        fold_grid_thirds(&[(&eq_grid, &acc_grid)], stride, acc0, acc_inf);
     }
 }
 
@@ -361,52 +351,17 @@ impl<EF: Field> NextPartials<EF> {
         let carry_data_grid = evals_01inf_grid_prefix(self.carry().as_slice());
         let omega_data_grid = evals_01inf_grid_prefix(self.omega().as_slice());
 
-        // First grid third: leading active coordinate fixed to 0; sum the three state-data products.
-        acc0.iter_mut()
-            .zip(
-                done_grid[..stride]
-                    .iter()
-                    .zip(done_data_grid[..stride].iter()),
-            )
-            .zip(
-                carry_grid[..stride]
-                    .iter()
-                    .zip(carry_data_grid[..stride].iter()),
-            )
-            .zip(
-                omega_grid[..stride]
-                    .iter()
-                    .zip(omega_data_grid[..stride].iter()),
-            )
-            .for_each(
-                |(((out, (&done, &done_data)), (&carry, &carry_data)), (&omega, &omega_data))| {
-                    *out += done * done_data + carry * carry_data + omega * omega_data;
-                },
-            );
-
-        // Last grid third: leading active coordinate fixed to inf; same three-term product.
-        acc_inf
-            .iter_mut()
-            .zip(
-                done_grid[2 * stride..]
-                    .iter()
-                    .zip(done_data_grid[2 * stride..].iter()),
-            )
-            .zip(
-                carry_grid[2 * stride..]
-                    .iter()
-                    .zip(carry_data_grid[2 * stride..].iter()),
-            )
-            .zip(
-                omega_grid[2 * stride..]
-                    .iter()
-                    .zip(omega_data_grid[2 * stride..].iter()),
-            )
-            .for_each(
-                |(((out, (&done, &done_data)), (&carry, &carry_data)), (&omega, &omega_data))| {
-                    *out += done * done_data + carry * carry_data + omega * omega_data;
-                },
-            );
+        // Fold the three state-data product terms over the 0 and inf thirds.
+        fold_grid_thirds(
+            &[
+                (&done_grid, &done_data_grid),
+                (&carry_grid, &carry_data_grid),
+                (&omega_grid, &omega_data_grid),
+            ],
+            stride,
+            acc0,
+            acc_inf,
+        );
     }
 
     /// Adds prefix-layout successor accumulator contributions for one round.
