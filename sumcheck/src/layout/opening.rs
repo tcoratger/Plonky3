@@ -8,7 +8,7 @@ use p3_multilinear_util::poly::Poly;
 
 use crate::Claim;
 use crate::svo::{
-    SvoAccumulators, SvoPoint, calculate_product_accumulator, evals_01inf_grid_prefix,
+    SvoAccumulators, SvoPoint, calculate_product_accumulator, evals_01inf_grid_prefix_into,
 };
 
 /// Multi-opening claim over an SVO point.
@@ -152,10 +152,20 @@ impl<EF: Field> EqPartials<EF> {
         assert_eq!(acc0.len(), stride);
         assert_eq!(acc_inf.len(), stride);
 
+        // Allocate the grid output and ping-pong scratch once, reused across both expansions.
+        let grid_len = 3 * stride;
+        let mut eq_grid = EF::zero_vec(grid_len);
+        let mut acc_grid = EF::zero_vec(grid_len);
+        let mut scratch = EF::zero_vec(2 * grid_len);
+
         // Expand the equality weight from the 2^l hypercube to the 3^l ternary grid.
-        let eq_grid = evals_01inf_grid_prefix(Poly::new_from_point(p_active, EF::ONE).as_slice());
+        evals_01inf_grid_prefix_into(
+            Poly::new_from_point(p_active, EF::ONE).as_slice(),
+            &mut eq_grid,
+            &mut scratch,
+        );
         // Expand the cached payload to the same ternary grid.
-        let acc_grid = evals_01inf_grid_prefix(self.poly().as_slice());
+        evals_01inf_grid_prefix_into(self.poly().as_slice(), &mut acc_grid, &mut scratch);
 
         // The first third of the grid fixes the leading active coordinate to 0.
         acc0.iter_mut()
@@ -353,13 +363,23 @@ impl<EF: Field> NextPartials<EF> {
         // TODO: carry and omega polys are sparse.
         let active = Self::from_point(p_active);
 
+        // Allocate the six grid outputs and one shared ping-pong scratch once, reused across all expansions.
+        let grid_len = 3 * stride;
+        let mut carry_grid = EF::zero_vec(grid_len);
+        let mut done_grid = EF::zero_vec(grid_len);
+        let mut omega_grid = EF::zero_vec(grid_len);
+        let mut done_data_grid = EF::zero_vec(grid_len);
+        let mut carry_data_grid = EF::zero_vec(grid_len);
+        let mut omega_data_grid = EF::zero_vec(grid_len);
+        let mut scratch = EF::zero_vec(2 * grid_len);
+
         // Expand every state and data table from the hypercube to the ternary grid.
-        let carry_grid = evals_01inf_grid_prefix(active.carry().as_slice());
-        let done_grid = evals_01inf_grid_prefix(active.done().as_slice());
-        let omega_grid = evals_01inf_grid_prefix(active.omega().as_slice());
-        let done_data_grid = evals_01inf_grid_prefix(self.done().as_slice());
-        let carry_data_grid = evals_01inf_grid_prefix(self.carry().as_slice());
-        let omega_data_grid = evals_01inf_grid_prefix(self.omega().as_slice());
+        evals_01inf_grid_prefix_into(active.carry().as_slice(), &mut carry_grid, &mut scratch);
+        evals_01inf_grid_prefix_into(active.done().as_slice(), &mut done_grid, &mut scratch);
+        evals_01inf_grid_prefix_into(active.omega().as_slice(), &mut omega_grid, &mut scratch);
+        evals_01inf_grid_prefix_into(self.done().as_slice(), &mut done_data_grid, &mut scratch);
+        evals_01inf_grid_prefix_into(self.carry().as_slice(), &mut carry_data_grid, &mut scratch);
+        evals_01inf_grid_prefix_into(self.omega().as_slice(), &mut omega_data_grid, &mut scratch);
 
         // First grid third: leading active coordinate fixed to 0; sum the three state-data products.
         acc0.iter_mut()
