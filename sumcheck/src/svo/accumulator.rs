@@ -72,6 +72,8 @@ pub(crate) fn calculate_accumulators_batch<F: Field, EF: ExtensionField<F>>(
             }
 
             // Each output third spans 3^round_idx rows over the trailing active coordinates.
+            // The stride 3^round_idx must fit in usize.
+            debug_assert!(round_idx < 41, "SVO ternary-grid exponent overflows usize");
             let stride = 3usize.pow(round_idx as u32);
             // Accumulator for the round polynomial at the active coordinate fixed to 0.
             let mut acc0 = EF::zero_vec(stride);
@@ -311,6 +313,8 @@ fn calculate_accumulator_general<F: Field, EF: ExtensionField<F>>(
     eq0: &[EF],
     reduced_evals: &[EF],
 ) -> [Vec<EF>; 2] {
+    // The ternary grid length 3^l must fit in usize.
+    debug_assert!(l < 41, "SVO ternary-grid exponent overflows usize");
     let grid_len = 3usize.pow(l as u32);
     let mut eq0_grid = EF::zero_vec(grid_len);
     let mut reduced_grid = EF::zero_vec(grid_len);
@@ -319,6 +323,8 @@ fn calculate_accumulator_general<F: Field, EF: ExtensionField<F>>(
     evals_01inf_grid_into(eq0, &mut eq0_grid, &mut scratch);
     evals_01inf_grid_into(reduced_evals, &mut reduced_grid, &mut scratch);
 
+    // The stride 3^(l-1) must fit in usize.
+    debug_assert!(l - 1 < 41, "SVO ternary-grid exponent overflows usize");
     let stride = 3usize.pow((l - 1) as u32);
     let acc0 = eq0_grid[..stride]
         .iter()
