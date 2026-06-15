@@ -3,6 +3,7 @@
 //! Extends Boolean-hypercube evaluations with the "evaluation at infinity" along
 //! every variable, producing the grid the SVO accumulators read from.
 
+#[cfg(test)]
 use alloc::vec::Vec;
 
 use p3_field::Field;
@@ -170,26 +171,59 @@ pub(super) fn evals_01inf_grid_into<F: Field>(
     }
 }
 
-pub(crate) fn evals_01inf_grid_prefix<F: Field>(evals: &[F]) -> Vec<F> {
-    fn reverse_ternary_digits(mut idx: usize, l: usize) -> usize {
-        let mut rev = 0usize;
-        for _ in 0..l {
-            rev = 3 * rev + (idx % 3);
-            idx /= 3;
-        }
-        rev
+/// Reverse the `l` base-3 digits of `idx`.
+fn reverse_ternary_digits(mut idx: usize, l: usize) -> usize {
+    let mut rev = 0usize;
+    for _ in 0..l {
+        rev = 3 * rev + (idx % 3);
+        idx /= 3;
     }
+    rev
+}
 
-    let grid_len = 3usize.pow(log2_strict_usize(evals.len()) as u32);
+/// Expand `2^l` Boolean-hypercube evaluations onto the `3^l` ternary grid in prefix order, reusing caller-owned buffers.
+///
+/// This is the scratch-reusing form of [`evals_01inf_grid_prefix`].
+/// It writes the same `3^l` bytes into `out` that the allocating form returns, without allocating.
+///
+/// # Arguments
+///
+/// - `evals`: the `2^l` Boolean-hypercube evaluations to expand.
+/// - `out`: destination for the `3^l` prefix-ordered grid values; its length must equal `3^l`.
+/// - `scratch`: working space of length `2 * 3^l`, used internally as two `3^l` ping-pong buffers.
+///
+/// # Panics
+///
+/// - Input length not a power of two.
+/// - `out` length != `3^l`.
+/// - `scratch` length != `2 * 3^l`.
+pub(crate) fn evals_01inf_grid_prefix_into<F: Field>(
+    evals: &[F],
+    out: &mut [F],
+    scratch: &mut [F],
+) {
     let l = log2_strict_usize(evals.len());
-    let mut prefix = F::zero_vec(grid_len);
-    let mut scratch = F::zero_vec(grid_len);
-    evals_01inf_grid_into(evals, &mut prefix, &mut scratch);
+    let grid_len = 3usize.pow(l as u32);
 
-    let mut out = F::zero_vec(grid_len);
-    for (src_idx, value) in prefix.into_iter().enumerate() {
+    assert_eq!(out.len(), grid_len);
+    assert_eq!(scratch.len(), 2 * grid_len);
+
+    // Split the scratch into the two ping-pong buffers the grid expansion needs.
+    let (grid, grid_scratch) = scratch.split_at_mut(grid_len);
+    evals_01inf_grid_into(evals, grid, grid_scratch);
+
+    // Permute the grid into prefix order by reversing each index's base-3 digits.
+    for (src_idx, &value) in grid.iter().enumerate() {
         out[reverse_ternary_digits(src_idx, l)] = value;
     }
+}
+
+#[cfg(test)]
+pub(crate) fn evals_01inf_grid_prefix<F: Field>(evals: &[F]) -> Vec<F> {
+    let grid_len = 3usize.pow(log2_strict_usize(evals.len()) as u32);
+    let mut out = F::zero_vec(grid_len);
+    let mut scratch = F::zero_vec(2 * grid_len);
+    evals_01inf_grid_prefix_into(evals, &mut out, &mut scratch);
     out
 }
 

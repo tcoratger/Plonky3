@@ -23,5 +23,7 @@ mod point;
 pub(crate) use accumulator::{
     SvoAccumulators, calculate_accumulators_batch, calculate_product_accumulator,
 };
+pub(crate) use grid::evals_01inf_grid_prefix_into;
+#[cfg(test)]
 pub(crate) use grid::evals_01inf_grid_prefix;
 pub use point::SvoPoint;
