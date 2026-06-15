@@ -77,6 +77,11 @@ pub(super) fn evals_01inf_grid_into<F: Field>(
     scratch: &mut [F],
 ) {
     let num_variables = log2_strict_usize(boolean_evals.len());
+    // The ternary grid length 3^num_variables must fit in usize.
+    debug_assert!(
+        num_variables < 41,
+        "SVO ternary-grid exponent overflows usize"
+    );
     let output_len = 3usize.pow(num_variables as u32);
 
     assert_eq!(output.len(), output_len);
@@ -180,8 +185,10 @@ pub(crate) fn evals_01inf_grid_prefix<F: Field>(evals: &[F]) -> Vec<F> {
         rev
     }
 
-    let grid_len = 3usize.pow(log2_strict_usize(evals.len()) as u32);
     let l = log2_strict_usize(evals.len());
+    // The ternary grid length 3^l must fit in usize.
+    debug_assert!(l < 41, "SVO ternary-grid exponent overflows usize");
+    let grid_len = 3usize.pow(l as u32);
     let mut prefix = F::zero_vec(grid_len);
     let mut scratch = F::zero_vec(grid_len);
     evals_01inf_grid_into(evals, &mut prefix, &mut scratch);
