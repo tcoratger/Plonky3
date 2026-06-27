@@ -408,7 +408,7 @@ mod error_variant_tests {
     //! Lock the precise error variant emitted on each opening-shape mismatch.
     use alloc::vec;
 
-    use p3_commit::{MultiOpeningMmcs, MultilinearPcs};
+    use p3_commit::{Mmcs, MultilinearPcs};
     use p3_multilinear_util::poly::Poly;
     use p3_sumcheck::layout::{Layout, SuffixProver, Table};
     use p3_sumcheck::{OpeningBatch, OpeningProtocol, SumcheckError, TableShape, TableSpec};
@@ -430,7 +430,7 @@ mod error_variant_tests {
     ///
     /// Returns the original row count, so the caller can assert the mismatch.
     fn drop_last_opened_row(
-        openings: &mut QueryOpenings<F, EF, <MyMmcs as MultiOpeningMmcs<F>>::MultiProof>,
+        openings: &mut QueryOpenings<F, EF, <MyMmcs as Mmcs<F>>::MultiProof>,
     ) -> usize {
         match openings {
             QueryOpenings::Base(opening) => {
