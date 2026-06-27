@@ -7,7 +7,7 @@ use criterion::{
     BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
 };
 use p3_challenger::DuplexChallenger;
-use p3_commit::{MultiOpeningMmcs, MultilinearPcs};
+use p3_commit::{Mmcs, MultilinearPcs};
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::Field;
 use p3_field::extension::QuinticTrinomialExtensionField;
@@ -36,11 +36,11 @@ type MerkleHash = PaddingFreeSponge<Poseidon24, 24, 16, 8>;
 type MerkleCompress = TruncatedPermutation<Poseidon16, 2, 8, 16>;
 type Challenger = DuplexChallenger<F, Poseidon16, 16, 8>;
 type PackedF = <F as Field>::Packing;
-type Mmcs = MerkleTreeMmcs<PackedF, PackedF, MerkleHash, MerkleCompress, 2, 8>;
+type MerkleMmcs = MerkleTreeMmcs<PackedF, PackedF, MerkleHash, MerkleCompress, 2, 8>;
 type Dft = Radix2DFTSmallBatch<F>;
 
 /// Concrete PCS instantiation parameterized by the sumcheck layout mode.
-type Pcs<L> = WhirProver<EF, F, Dft, Mmcs, Challenger, L>;
+type Pcs<L> = WhirProver<EF, F, Dft, MerkleMmcs, Challenger, L>;
 
 // Polynomial sizes (log_2 of coefficient count).
 const SMALL: usize = 14;
@@ -165,7 +165,7 @@ impl<L: Layout<F, EF>> Bench<L> {
         let poseidon24 = Poseidon24::new_from_rng_128(&mut perm_rng);
 
         // Wire the Merkle hash (24-wide) and 2-to-1 compress (16-wide).
-        let mmcs = Mmcs::new(
+        let mmcs = MerkleMmcs::new(
             MerkleHash::new(poseidon24),
             MerkleCompress::new(poseidon16.clone()),
             0,
@@ -303,7 +303,7 @@ impl<L: Layout<F, EF>> Bench<L> {
     }
 
     /// Produce one honest proof outside any timing window.
-    fn build_proof(&self) -> PcsProof<F, EF, Mmcs> {
+    fn build_proof(&self) -> PcsProof<F, EF, MerkleMmcs> {
         let mut challenger = self.challenger();
         let (_, prover_data) = <Pcs<L> as MultilinearPcs<EF, Challenger>>::commit(
             &self.pcs,
@@ -329,28 +329,26 @@ impl<L: Layout<F, EF>> Bench<L> {
         //   paths[0].siblings.len() = full root-to-leaf path length
         //   full   = queries * that length   (the unpruned per-query cost)
         //   pruned = sum over paths of siblings.len()
-        let round_stats =
-            |openings: &QueryOpenings<F, EF, <Mmcs as MultiOpeningMmcs<F>>::MultiProof>| {
-                let paths = match openings {
-                    QueryOpenings::Base(opening) => &opening.proof,
-                    QueryOpenings::Extension(opening) => &opening.proof,
-                };
-                let queries = paths.original_order.len();
-                let pruned: usize = paths.paths.iter().map(|p| p.siblings.len()).sum();
-                let full_path_len = paths.paths.first().map_or(0, |p| p.siblings.len());
-                (queries, pruned, queries * full_path_len)
+        let round_stats = |openings: &QueryOpenings<F, EF, <MerkleMmcs as Mmcs<F>>::MultiProof>| {
+            let paths = match openings {
+                QueryOpenings::Base(opening) => &opening.proof,
+                QueryOpenings::Extension(opening) => &opening.proof,
             };
+            let queries = paths.original_order.len();
+            let pruned: usize = paths.paths.iter().map(|p| p.siblings.len()).sum();
+            let full_path_len = paths.paths.first().map_or(0, |p| p.siblings.len());
+            (queries, pruned, queries * full_path_len)
+        };
 
         let mut stir_queries = 0;
         let mut pruned_digests = 0;
         let mut full_digests = 0;
-        let mut accumulate =
-            |o: &QueryOpenings<F, EF, <Mmcs as MultiOpeningMmcs<F>>::MultiProof>| {
-                let (q, pruned, full) = round_stats(o);
-                stir_queries += q;
-                pruned_digests += pruned;
-                full_digests += full;
-            };
+        let mut accumulate = |o: &QueryOpenings<F, EF, <MerkleMmcs as Mmcs<F>>::MultiProof>| {
+            let (q, pruned, full) = round_stats(o);
+            stir_queries += q;
+            pruned_digests += pruned;
+            full_digests += full;
+        };
         for round in &proof.whir.rounds {
             accumulate(&round.openings);
         }
