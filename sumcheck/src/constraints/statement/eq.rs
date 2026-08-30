@@ -2,7 +2,8 @@ use alloc::vec::Vec;
 
 use itertools::Itertools;
 use p3_field::{
-    ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing, dot_product,
+    Algebra, ExtensionField, Field, PackedFieldExtension, PackedValue, PrimeCharacteristicRing,
+    dot_product,
 };
 use p3_matrix::Matrix;
 use p3_matrix::dense::{RowMajorMatrix, RowMajorMatrixView};
@@ -12,6 +13,44 @@ use p3_multilinear_util::point::Point;
 use p3_multilinear_util::poly::Poly;
 use p3_util::log2_strict_usize;
 use tracing::instrument;
+
+/// Doubles the filled region of `mat` once per variable row of `vars`.
+///
+/// # Overview
+///
+/// Variable row i splits the current coefficients into a low half and a high half.
+/// It then fills the high half from the low half:
+///
+/// ```text
+/// hi[j] = lo[j] * var[j]        (contribution when X_i = 1)
+/// lo[j] -= hi[j]                 (contribution when X_i = 0)
+/// ```
+///
+/// The low and high halves hold algebra elements of type `T`.
+/// The variable values are base elements of type `V`, one per column.
+///
+/// # Arguments
+///
+/// - `mat`: coefficient matrix whose first 2^i rows are filled before processing variable row i.
+/// - `vars`: one row per variable, each holding one value per column.
+fn eq_butterfly<V: Copy + Send + Sync, T: Algebra<V> + Copy + Send + Sync>(
+    mat: &mut RowMajorMatrix<T>,
+    vars: RowMajorMatrixView<'_, V>,
+) {
+    vars.row_slices().enumerate().for_each(|(i, vars)| {
+        let (mut lo, mut hi) = mat.split_rows_mut(1 << i);
+        lo.rows_mut().zip(hi.rows_mut()).for_each(|(lo, hi)| {
+            vars.iter()
+                .zip(lo.iter_mut().zip(hi.iter_mut()))
+                .for_each(|(&var, (lo, hi))| {
+                    // hi = lo * var (X_i = 1 branch)
+                    *hi = *lo * var;
+                    // lo = lo * (1 - var) = lo - hi (X_i = 0 branch)
+                    *lo -= *hi;
+                });
+        });
+    });
+}
 
 /// Batched equality polynomial evaluation via butterfly expansion.
 ///
@@ -56,19 +95,7 @@ fn batch_eqs<F: Field, EF: ExtensionField<F>>(
     );
 
     // Butterfly: process one variable per step.
-    points.row_slices().enumerate().for_each(|(i, vars)| {
-        let (mut lo, mut hi) = mat.split_rows_mut(1 << i);
-        lo.rows_mut().zip(hi.rows_mut()).for_each(|(lo, hi)| {
-            vars.iter()
-                .zip(lo.iter_mut().zip(hi.iter_mut()))
-                .for_each(|(&var, (lo, hi))| {
-                    // hi = lo * var (X_i = 1 branch)
-                    *hi = *lo * var;
-                    // lo = lo * (1 - var) = lo - hi (X_i = 0 branch)
-                    *lo -= *hi;
-                });
-        });
-    });
+    eq_butterfly(&mut mat, points);
     mat
 }
 
@@ -130,19 +157,7 @@ fn packed_batch_eqs<F: Field, EF: ExtensionField<F>>(
 
     // Butterfly phase: same eq expansion as the scalar version,
     // but operating on packed elements for SIMD parallelism.
-    rest_vars.row_slices().enumerate().for_each(|(i, vars)| {
-        let (mut lo, mut hi) = mat.split_rows_mut(1 << i);
-        lo.rows_mut().zip(hi.rows_mut()).for_each(|(lo, hi)| {
-            vars.iter()
-                .zip(lo.iter_mut().zip(hi.iter_mut()))
-                .for_each(|(&var, (lo, hi))| {
-                    // hi = lo * var (X_i = 1 branch)
-                    *hi = *lo * var;
-                    // lo = lo * (1 - var) = lo - hi (X_i = 0 branch)
-                    *lo -= *hi;
-                });
-        });
-    });
+    eq_butterfly(&mut mat, rest_vars);
     mat
 }
 
