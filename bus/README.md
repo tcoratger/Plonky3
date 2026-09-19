@@ -2,6 +2,8 @@
 
 Field-generic primitives for a direction-aware multiset bus.
 
-The crate plans mixed-height bus layouts, materializes fingerprint factors, and reduces their products with GKR.
+The crate plans mixed-height bus layouts, materializes fingerprint factors, and reduces their
+products with GKR.
 
-It does not connect those claims to committed trace columns.
+The standalone reduction returns unauthenticated terminal claims. `p3-multi-stark` binds them to
+committed trace columns with a composition sumcheck and prescribed-point openings.

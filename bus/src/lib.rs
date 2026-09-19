@@ -4,9 +4,11 @@
 extern crate alloc;
 
 mod builder;
+mod evaluation;
 mod leaf;
 mod plan;
 mod product;
+mod protocol;
 mod security;
 mod transcript;
 
@@ -14,6 +16,7 @@ pub use builder::{
     BusActivation, BusInteractionBuilder, BusInteractionRecorder, BusSymbolicBuilder, RecordToken,
     SymbolicBusInteraction,
 };
+pub use evaluation::{BusEvaluation, BusEvaluationError};
 pub use leaf::{BusDirection, BusLeafDeclaration, BusLeafError, BusLeaves, BusSelector};
 pub use plan::{
     BusBlock, BusBlockOwner, BusDomain, BusExpressionLocation, BusPlan, BusPlanError, BusPlanInput,
@@ -23,3 +26,4 @@ pub use product::{
     ProductGkrError, ProductGkrLayerProof, ProductGkrOutput, ProductGkrProof, ProductGkrRootShape,
     ProductGkrShape, ProductGkrShapeError,
 };
+pub use protocol::{BusArgumentError, BusChallenges, BusProof, BusReductionOutput};
