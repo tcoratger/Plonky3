@@ -1142,6 +1142,7 @@ fn verify_whir_compat_fixture() -> Result<(), Box<dyn std::error::Error>> {
         0,
         &mut challenger(),
     )?;
+
     Ok(())
 }
 
