@@ -23,6 +23,7 @@
 //! one, two and four streams in flight, four measured fastest at every benchmarked length on an
 //! Apple M2, which is why [`LANES`] stays four here too.
 
+pub(crate) mod t253;
 pub(crate) mod t8;
 
 use core::arch::aarch64::{

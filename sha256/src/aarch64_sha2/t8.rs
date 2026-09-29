@@ -25,17 +25,17 @@ use crate::t8::{BLOCK_BYTES, STAGE_STRIDE};
 
 /// Eight words, a chaining value or a 32-byte block, as a pair of vectors.
 #[derive(Clone, Copy)]
-struct Pair {
+pub(super) struct Pair {
     /// Words 0 to 3: `abcd` of a state, or the first four message words.
-    lo: uint32x4_t,
+    pub(super) lo: uint32x4_t,
     /// Words 4 to 7: `efgh` of a state, or the next four message words.
-    hi: uint32x4_t,
+    pub(super) hi: uint32x4_t,
 }
 
 impl Pair {
     /// Load 32 bytes as eight big-endian words.
     #[inline(always)]
-    fn load(bytes: &[u8; BLOCK_BYTES]) -> Self {
+    pub(super) fn load(bytes: &[u8; BLOCK_BYTES]) -> Self {
         // SAFETY: both 16-byte reads lie inside the 32-byte array.
         // The module compiles only with `neon`, which the loads and the byte reversal need.
         //
@@ -75,7 +75,7 @@ impl Pair {
 
     /// Store as 32 big-endian bytes, the digest encoding.
     #[inline(always)]
-    fn store(self, out: &mut [u8; 32]) {
+    pub(super) fn store(self, out: &mut [u8; 32]) {
         // SAFETY: both 16-byte writes lie inside the 32-byte array, and `neon` is enabled.
         unsafe {
             let p = out.as_mut_ptr();
@@ -86,7 +86,7 @@ impl Pair {
 
     /// Word-wise XOR.
     #[inline(always)]
-    fn xor(self, other: Self) -> Self {
+    pub(super) fn xor(self, other: Self) -> Self {
         // SAFETY: `veorq_u32` is `neon`, which the module requires.
         unsafe {
             Self {
@@ -101,7 +101,7 @@ impl Pair {
 ///
 /// The streams are independent, so the core overlaps their round chains.
 #[inline(always)]
-fn compress<const N: usize>(h: &mut [Pair; N], y: [Pair; N], z: [Pair; N]) {
+pub(super) fn compress<const N: usize>(h: &mut [Pair; N], y: [Pair; N], z: [Pair; N]) {
     let entry = *h;
     let mut schedule: [[uint32x4_t; SCHEDULE_VECTORS]; N] =
         core::array::from_fn(|i| [y[i].lo, y[i].hi, z[i].lo, z[i].hi]);
