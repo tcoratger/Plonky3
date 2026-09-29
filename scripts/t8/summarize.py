@@ -7,6 +7,39 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# What differs between the hosts a report is written for.
+#
+# - pin: the prefix that keeps a one-thread run on one core, empty where the OS has none.
+# - threads: every hardware thread of the host.
+# - pin_note: how single-threaded runs stay put.
+# - notes: host-specific lines of the closing notes.
+PLATFORMS = {
+    "x86-avx512": {
+        "pin": "taskset -c 4 ",
+        "threads": 32,
+        "pin_note": "`taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.",
+        "notes": [
+            "The build targets the host CPU, so all three hashes batch on AVX-512.",
+            "Both leaves share the transpose of every record into vector lanes, which the call count does not see.",
+            "Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.",
+            "So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.",
+            "On one thread, commitment follows the call ratio.",
+            "On 32 threads, trees of 256-byte records wait on memory, so fewer calls barely shows.",
+            "Trees of 64 KiB-class records stay compute-bound on 32 threads, and keep most of the call saving.",
+            "A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.",
+        ],
+    },
+    "mac-neon": {
+        "pin": "",
+        "threads": 10,
+        "pin_note": "macOS has no core pinning, so single-threaded runs are left to the scheduler, which keeps a busy thread on a performance core.",
+        "notes": [],
+    },
+}
+
+# The host this report is written for, set by `main`.
+PLATFORM = PLATFORMS["x86-avx512"]
+
 HASHES = {"blake3": "BLAKE3", "blake2s": "BLAKE2s", "sha256": "SHA-256", "keccak": "Keccak-256"}
 RECORDS = [256, 480, 65_664]
 
@@ -94,7 +127,8 @@ def calls_table() -> str:
 BENCH = "cargo bench -p p3-merkle-tree --features parallel --profile optimized"
 
 # What produced each table: the command, then its parameters.
-LEAF_BATCH = f"""Command: `taskset -c 4 {BENCH} --bench t8_leaf -- 'leaf/.*/batch'`
+def leaf_batch() -> str:
+    return f"""Command: `{PLATFORM['pin']}{BENCH} --bench t8_leaf -- 'leaf/.*/batch'`
 
 - Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_many` call over the whole batch, on one thread.
 - Batches: 2^16 records of 256 B, 2^15 of 480 B, 2^8 of 65,664 B, so 16 MiB each.
@@ -102,17 +136,19 @@ LEAF_BATCH = f"""Command: `taskset -c 4 {BENCH} --bench t8_leaf -- 'leaf/.*/batc
 - Criterion: 1 s warm-up, 3 s measurement, 100 samples.
 """
 
-LEAF_SINGLE = f"""Command: `taskset -c 4 {BENCH} --bench t8_leaf -- 'leaf/.*/single'`
+def leaf_single() -> str:
+    return f"""Command: `{PLATFORM['pin']}{BENCH} --bench t8_leaf -- 'leaf/.*/single'`
 
 - Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_slice` call on one record, the path a verifier takes.
 - Records: 256 B, 480 B and 65,664 B.
 - Criterion: 0.5 s warm-up, 2 s measurement, 100 samples.
 """
 
-COMMIT = f"""Commands:
+def commit() -> str:
+    return f"""Commands:
 
-- one thread: `RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_commit`
-- every hardware thread: `RAYON_NUM_THREADS=32 {BENCH} --bench t8_commit`
+- one thread: `RAYON_NUM_THREADS=1 {PLATFORM['pin']}{BENCH} --bench t8_commit`
+- every hardware thread: `RAYON_NUM_THREADS={PLATFORM['threads']} {BENCH} --bench t8_commit`
 
 - Code: `merkle-tree/benches/t8_commit.rs`, one `MerkleTree::new` over a borrowed byte matrix, one record per row.
 - Timing covers leaf hashing, node hashing, and the digest layers' allocation and release.
@@ -121,7 +157,8 @@ COMMIT = f"""Commands:
 - Criterion: 1 s warm-up, 3 s measurement, 10 samples.
 """
 
-VERIFY = f"""Command: `taskset -c 4 {BENCH} --bench t8_verify`
+def verify() -> str:
+    return f"""Command: `{PLATFORM['pin']}{BENCH} --bench t8_verify`
 
 - Code: `merkle-tree/benches/t8_verify.rs`, `MerkleTreeMmcs::verify_batch` on prepared openings, cap height 0.
 - Each sample verifies 64 openings at distinct random positions, the same for both columns.
@@ -156,7 +193,7 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {cell(s)} | {cell(t)} |"
                 f" {bytes_ / s[0]:.2f} | {bytes_ / t[0]:.2f} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |"
             )
-    out.append("### Leaf hashing, batched, one core\n\n" + LEAF_BATCH + "\n" + "\n".join(rows))
+    out.append("### Leaf hashing, batched, one core\n\n" + leaf_batch() + "\n" + "\n".join(rows))
 
     # Leaf hashing, one record at a time.
     rows = [
@@ -171,7 +208,7 @@ def measured(data: dict, build: str) -> str:
             s, t = per["standard"], per["t8"]
             ratio = standard_leaf(key, length) / t8_leaf(length)
             rows.append(f"| {HASHES[key]} | {length:,} B | {cell(s)} | {cell(t)} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |")
-    out.append("### Leaf hashing, one record, one core\n\n" + LEAF_SINGLE + "\n" + "\n".join(rows))
+    out.append("### Leaf hashing, one record, one core\n\n" + leaf_single() + "\n" + "\n".join(rows))
 
     # Commitment.
     rows = [
@@ -193,7 +230,7 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {threads} | {cell(s)} | {cell(t)} |"
                 f" {bytes_ / s[0]:.2f} | {bytes_ / t[0]:.2f} | **{s[0] / t[0]:.3f}x** | {cs / ct:.3f}x |"
             )
-    out.append("### Commitment: one full tree\n\n" + COMMIT + "\n" + "\n".join(rows))
+    out.append("### Commitment: one full tree\n\n" + commit() + "\n" + "\n".join(rows))
 
     # Verification.
     rows = [
@@ -214,11 +251,13 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {cell(per_open(s))} | {cell(per_open(t))} |"
                 f" **{s[0] / t[0]:.3f}x** | {cs / ct:.3f}x |"
             )
-    out.append("### Verification: one opening, one core\n\n" + VERIFY + "\n" + "\n".join(rows))
+    out.append("### Verification: one opening, one core\n\n" + verify() + "\n" + "\n".join(rows))
     return "\n\n".join(out)
 
 
-def main(results: Path) -> None:
+def main(results: Path, platform: str) -> None:
+    global PLATFORM
+    PLATFORM = PLATFORMS[platform]
     data: dict = {}
     for build in ("default", "native"):
         root = results / f"criterion-{build}"
@@ -236,18 +275,19 @@ def main(results: Path) -> None:
     print("Or one table at a time, reading the numbers criterion prints:\n")
     print("```sh")
     print("export RUSTFLAGS=-Ctarget-cpu=native")
-    print(f"taskset -c 4 {BENCH} --bench t8_leaf")
-    print(f"taskset -c 4 {BENCH} --bench t8_verify")
-    print(f"RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_commit")
-    print(f"RAYON_NUM_THREADS=32 {BENCH} --bench t8_commit")
+    pin = PLATFORM["pin"]
+    print(f"{pin}{BENCH} --bench t8_leaf")
+    print(f"{pin}{BENCH} --bench t8_verify")
+    print(f"RAYON_NUM_THREADS=1 {pin}{BENCH} --bench t8_commit")
+    print(f"RAYON_NUM_THREADS={PLATFORM['threads']} {BENCH} --bench t8_commit")
     print("```\n")
     print("- Every command in this report assumes `RUSTFLAGS=-Ctarget-cpu=native`, as exported above.")
     print("- A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.")
-    print("- `taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.")
+    print(f"- {PLATFORM['pin_note']}")
     print("- `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.")
     print("- Criterion prints `time: [low median high]`, the 95% interval of the median.")
     print("- It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.")
-    print("- The script saves them as the baseline `native`, copies them to `scripts/t8/results/`, and builds this report from them.\n")
+    print(f"- The script saves them as the baseline `native`, copies them to `scripts/t8/results/{platform}/`, and builds this report from them.\n")
     print("## Reading the tables\n")
     print("- **Standard, T8**: criterion's median time, with the half-width of its 95% interval.")
     print("- **GB/s**: record bytes hashed per second, 1 GB = 10^9 bytes.")
@@ -273,15 +313,8 @@ def main(results: Path) -> None:
     print("- BLAKE2s keeps them apart with counters 1, 2 and 3 and the final flag clear, which no plain BLAKE2s call uses.")
     print("- SHA-256's compression takes exactly 96 bytes, so its three calls are one function. The security analysis does not cover that instantiation.")
     print("- Keccak-256 absorbs 136 bytes per permutation, so T8 costs more calls than the plain hash and is not measured.")
-    print("- The build targets the host CPU, so all three hashes batch on AVX-512.")
-    print("- Both leaves share the transpose of every record into vector lanes, which the call count does not see.")
-    print("- Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.")
-    print("- So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.")
-    print("- On one thread, commitment follows the call ratio.")
-    print("- On 32 threads, trees of 256-byte records wait on memory, so fewer calls barely shows.")
-    print("- Trees of 64 KiB-class records stay compute-bound on 32 threads, and keep most of the call saving.")
-    print("- A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.")
-
+    for line in PLATFORM["notes"]:
+        print(f"- {line}")
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else "x86-avx512")
