@@ -208,10 +208,12 @@ fn single_record_paths_match_the_reference() {
 fn batches_match_the_reference() {
     // Invariant: the batched path agrees with the reference on every batch shape.
     //
-    // Fixture state: counts on both sides of the one-at-a-time cutoff and of the 32-lane group.
+    // Fixture state: counts on both sides of the one-at-a-time cutoff, the four-stream group and the 32-lane group.
     for k in 1..=3 {
         let len = record_len(k);
-        for count in [0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 47, 63, 64, 65, 100] {
+        for count in [
+            0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 47, 63, 64, 65, 100,
+        ] {
             let input = data(len * count, (k * 1000 + count) as u64);
             let mut out = vec![[0u8; 32]; count];
             T8Sha256.hash_many(&input, &mut out);
