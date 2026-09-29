@@ -45,6 +45,11 @@ PLATFORMS = {
             "On one thread, SHA-256 commitment follows the call ratio, and BLAKE3 and BLAKE2s land a little below it, as their batched leaves do.",
             "On all 10 cores, trees of 256-byte records keep most of the call saving, unlike on the 32 threads of the x86 host.",
             "A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.5x rows.",
+            "BLAKE3 pairs a and b on x86 only: two BLAKE3 calls in one NEON pass cost about as much as two scalar calls.",
+            "T253 runs on the same ARM SHA-2 kernel as T8, so its batches follow the call ratio and one record waits on two calls per stage.",
+            "Past its first stage, one T253 record costs about 20 ns more per stage than one T8 record, which the call counts do not explain.",
+            "The standard one-record SHA-256 rows moved from 180 to 203 ns at 256 B, and from 294 to 321 ns at 480 B, when the T253 benches joined the binary.",
+            "Their code is unchanged, so the shift is code layout, and it flatters the one-record SHA-256 speedups by about 10%.",
         ],
     },
 }
