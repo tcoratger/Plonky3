@@ -201,7 +201,7 @@ fn stage(z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
     crate::aarch64_sha2::t8::stage(z1, fresh)
 }
 
-/// One evaluation of T8 through `sha2`, one call at a time.
+/// One evaluation of T8: the two independent calls as a pair on x86-64 SHA-NI, the last through `sha2`.
 #[cfg(not(all(
     target_arch = "aarch64",
     target_feature = "neon",
@@ -219,9 +219,17 @@ fn stage(z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
         state
     };
 
-    // The two independent calls.
-    let a = compress(z1, block(0));
-    let b = compress(word_block(64), block(96));
+    // The two independent calls: two interleaved SHA-NI streams when the CPU has them.
+    let z4 = word_block(64);
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    let (a, b) = if crate::x86_64_sha_ni_pair::supported() {
+        // SAFETY: the CPU check above found SHA-NI and SSE4.1.
+        unsafe { crate::x86_64_sha_ni_pair::compress_pair((&z1, block(0)), (&z4, block(96))) }
+    } else {
+        (compress(z1, block(0)), compress(z4, block(96)))
+    };
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
+    let (a, b) = (compress(z1, block(0)), compress(z4, block(96)));
 
     // The last call: chaining value a ^ z_7, block (b ^ z_7) || z_8.
     let z7 = word_block(160);

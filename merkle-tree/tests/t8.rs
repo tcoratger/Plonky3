@@ -4,10 +4,16 @@ use p3_commit::{BatchOpeningRef, Mmcs};
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::{MerkleTree, MerkleTreeMmcs};
-use p3_sha256::{Sha256Compress, T8Sha256};
+use p3_sha256::{Sha256Compress, T8Sha256, T253Sha256};
 use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, PseudoCompressionFunction};
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
+
+/// T8 records of one, two and three stages: `32 + 224 k` bytes.
+const T8_LENS: [usize; 3] = [256, 480, 704];
+
+/// T253 records of one, two and three stages: `32 + 221 k` bytes.
+const T253_LENS: [usize; 3] = [253, 474, 695];
 
 /// A matrix of `rows` random records of `len` bytes.
 fn records(rows: usize, len: usize, seed: u64) -> RowMajorMatrix<u8> {
@@ -16,7 +22,7 @@ fn records(rows: usize, len: usize, seed: u64) -> RowMajorMatrix<u8> {
 }
 
 /// Plonky3's tree over T8 leaves has the textbook root of the same leaves and nodes.
-fn textbook_root<H, C>(leaf: &H, node: &C)
+fn textbook_root<H, C>(leaf: &H, node: &C, lens: [usize; 3])
 where
     H: CryptographicHasher<u8, [u8; 32]> + Sync,
     C: PseudoCompressionFunction<[u8; 32], 2> + Sync,
@@ -25,7 +31,13 @@ where
     //
     //     v_0,i = T8(X_i)
     //     v_l+1,j = C(v_l,2j, v_l,2j+1)
-    for (rows, len) in [(1, 256), (2, 256), (64, 256), (256, 480), (32, 704)] {
+    for (rows, len) in [
+        (1, lens[0]),
+        (2, lens[0]),
+        (64, lens[0]),
+        (256, lens[1]),
+        (32, lens[2]),
+    ] {
         let matrix = records(rows, len, rows as u64);
 
         // Plonky3's tree builder, batched leaves and all.
@@ -49,7 +61,7 @@ where
 }
 
 /// Openings of a T8 tree verify, and a flipped record bit is rejected.
-fn openings<H, C>(leaf: H, node: C)
+fn openings<H, C>(leaf: H, node: C, lens: [usize; 2])
 where
     H: CryptographicHasher<u8, [u8; 32]> + Sync,
     C: PseudoCompressionFunction<[u8; 32], 2> + Sync,
@@ -58,7 +70,7 @@ where
     //
     // Fixture state: 128 records of 256 bytes, and a tree of 37 records that needs padding.
     let mmcs = MerkleTreeMmcs::<u8, u8, H, C, 2, 32>::new(leaf, node, 0);
-    for (rows, len) in [(128, 256), (37, 480)] {
+    for (rows, len) in [(128, lens[0]), (37, lens[1])] {
         let matrix = records(rows, len, 7 + rows as u64);
         let dims = [matrix.dimensions()];
         let (commit, data) = mmcs.commit(vec![matrix]);
@@ -83,19 +95,25 @@ where
 #[test]
 fn blake3_trees() {
     let node = CompressionFunctionFromHasher::<_, 2, 32>::new(Blake3);
-    textbook_root(&T8Blake3, &node);
-    openings(T8Blake3, node);
+    textbook_root(&T8Blake3, &node, T8_LENS);
+    openings(T8Blake3, node, [T8_LENS[0], T8_LENS[1]]);
 }
 
 #[test]
 fn blake2s_trees() {
     let node = CompressionFunctionFromHasher::<_, 2, 32>::new(Blake2s256);
-    textbook_root(&T8Blake2s, &node);
-    openings(T8Blake2s, node);
+    textbook_root(&T8Blake2s, &node, T8_LENS);
+    openings(T8Blake2s, node, [T8_LENS[0], T8_LENS[1]]);
 }
 
 #[test]
 fn sha256_trees() {
-    textbook_root(&T8Sha256, &Sha256Compress);
-    openings(T8Sha256, Sha256Compress);
+    textbook_root(&T8Sha256, &Sha256Compress, T8_LENS);
+    openings(T8Sha256, Sha256Compress, [T8_LENS[0], T8_LENS[1]]);
+}
+
+#[test]
+fn sha256_t253_trees() {
+    textbook_root(&T253Sha256, &Sha256Compress, T253_LENS);
+    openings(T253Sha256, Sha256Compress, [T253_LENS[0], T253_LENS[1]]);
 }
