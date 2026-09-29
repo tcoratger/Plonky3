@@ -33,7 +33,7 @@ for build in native; do
     # The environment of this build.
     {
         echo "date: $(date -Iseconds)"
-        echo "plonky3: $(git rev-parse HEAD) + the uncommitted T8 files"
+        echo "commit: $(git rev-parse HEAD)$(git diff --quiet HEAD -- . ":!scripts/t8/results" || echo " + local changes")"
         echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
         echo "kernel: $(uname -r)"
         echo "rustc: $(rustc --version)"

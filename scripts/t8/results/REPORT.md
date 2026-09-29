@@ -1,10 +1,40 @@
 # T8 leaves on Plonky3
 
-Each hash's standard leaf against T8 on the same compression kernel, inside an unchanged Plonky3 tree.
+Each hash's standard Merkle leaf against its T8 leaf, on the same compression kernel, inside an unchanged Plonky3 tree.
 
-Times are criterion medians with the half-width of their 95% interval.
+## How to reproduce
 
-Speedup is standard time over T8 time; the call ratio is what counting compressions predicts.
+From the repository root, on the `t8-leaves` branch:
+
+```sh
+# Everything below, then this report, in about 8 minutes.
+scripts/t8/run.sh
+```
+
+Or one table at a time, reading the numbers criterion prints:
+
+```sh
+export RUSTFLAGS=-Ctarget-cpu=native
+taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_leaf
+taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_verify
+RAYON_NUM_THREADS=1 taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_commit
+RAYON_NUM_THREADS=32 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_commit
+```
+
+- Every command in this report assumes `RUSTFLAGS=-Ctarget-cpu=native`, as exported above.
+- A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.
+- `taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.
+- `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.
+- Criterion prints `time: [low median high]`, the 95% interval of the median.
+- It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.
+- The script saves them as the baseline `native`, copies them to `scripts/t8/results/`, and builds this report from them.
+
+## Reading the tables
+
+- **Standard, T8**: criterion's median time, with the half-width of its 95% interval.
+- **GB/s**: record bytes hashed per second, 1 GB = 10^9 bytes.
+- **Speedup**: standard time over T8 time, so above 1 means T8 is faster.
+- **Call ratio**: standard calls over T8 calls, what counting compressions alone predicts.
 
 ## Setup
 
@@ -40,11 +70,18 @@ Counted, not timed. A tree of N records adds the same N - 1 node calls to both l
 | Keccak-256 | 480 B | 4 | 6 | -50.0% |
 | Keccak-256 | 65,664 B | 483 | 879 | -82.0% |
 
-## Measured, native build
+## Measured
 
-**Leaf hashing, batched, one core** (GiB/s counts record bytes; 1 GiB/s = 1.074 B/ns)
+### Leaf hashing, batched, one core
 
-| Hash | Record | Records | Standard | T8 | Standard GiB/s | T8 GiB/s | Speedup | Call ratio |
+Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_leaf -- 'leaf/.*/batch'`
+
+- Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_many` call over the whole batch, on one thread.
+- Batches: 2^16 records of 256 B, 2^15 of 480 B, 2^8 of 65,664 B, so 16 MiB each.
+- Input: deterministic xorshift bytes, generated before timing.
+- Criterion: 1 s warm-up, 3 s measurement, 100 samples.
+
+| Hash | Record | Records | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | BLAKE3 | 256 B | 2^16 | 1.21 ms ±0.0% | 1.01 ms ±0.1% | 13.86 | 16.54 | **1.194x** | 1.333x |
 | BLAKE3 | 480 B | 2^15 | 1.17 ms ±0.0% | 965 µs ±0.0% | 13.46 | 16.31 | **1.211x** | 1.333x |
@@ -56,7 +93,13 @@ Counted, not timed. A tree of N records adds the same N - 1 node calls to both l
 | SHA-256 | 480 B | 2^15 | 1.91 ms ±0.0% | 1.81 ms ±0.0% | 8.25 | 8.70 | **1.054x** | 1.333x |
 | SHA-256 | 65,664 B | 2^8 | 1.89 ms ±0.0% | 2 ms ±0.1% | 8.90 | 8.40 | **0.943x** | 1.168x |
 
-**Leaf hashing, one record, one core** (the verifier's leaf)
+### Leaf hashing, one record, one core
+
+Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_leaf -- 'leaf/.*/single'`
+
+- Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_slice` call on one record, the path a verifier takes.
+- Records: 256 B, 480 B and 65,664 B.
+- Criterion: 0.5 s warm-up, 2 s measurement, 100 samples.
 
 | Hash | Record | Standard | T8 | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|
@@ -70,9 +113,20 @@ Counted, not timed. A tree of N records adds the same N - 1 node calls to both l
 | SHA-256 | 480 B | 203 ns ±0.1% | 145 ns ±0.0% | **1.401x** | 1.333x |
 | SHA-256 | 65,664 B | 24.2 µs ±0.0% | 21.8 µs ±0.0% | **1.112x** | 1.168x |
 
-**Commitment: one full tree**
+### Commitment: one full tree
 
-| Hash | Record | Records | Threads | Standard | T8 | Standard GiB/s | T8 GiB/s | Speedup | Call ratio |
+Commands:
+
+- one thread: `RAYON_NUM_THREADS=1 taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_commit`
+- every hardware thread: `RAYON_NUM_THREADS=32 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_commit`
+
+- Code: `merkle-tree/benches/t8_commit.rs`, one `MerkleTree::new` over a borrowed byte matrix, one record per row.
+- Timing covers leaf hashing, node hashing, and the digest layers' allocation and release.
+- Trees: 2^16 and 2^20 records of 256 B, and 2^10 records of 65,664 B.
+- Nodes: BLAKE3 or BLAKE2s of the 64 child bytes, or one SHA-256 compression, the same in both columns.
+- Criterion: 1 s warm-up, 3 s measurement, 10 samples.
+
+| Hash | Record | Records | Threads | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | BLAKE3 | 256 B | 2^16 | 1 | 2.01 ms ±0.3% | 1.97 ms ±0.1% | 8.33 | 8.51 | **1.021x** | 1.250x |
 | BLAKE3 | 256 B | 2^20 | 1 | 37.3 ms ±5.1% | 40.1 ms ±4.7% | 7.19 | 6.70 | **0.932x** | 1.250x |
@@ -93,7 +147,15 @@ Counted, not timed. A tree of N records adds the same N - 1 node calls to both l
 | SHA-256 | 65,664 B | 2^10 | 1 | 13.4 ms ±17.4% | 9.98 ms ±5.8% | 5.01 | 6.74 | **1.346x** | 1.168x |
 | SHA-256 | 65,664 B | 2^10 | 32 | 2.12 ms ±2.9% | 2.16 ms ±9.0% | 31.65 | 31.13 | **0.984x** | 1.168x |
 
-**Verification: one opening, one core** (64 openings per sample)
+### Verification: one opening, one core
+
+Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profile optimized --bench t8_verify`
+
+- Code: `merkle-tree/benches/t8_verify.rs`, `MerkleTreeMmcs::verify_batch` on prepared openings, cap height 0.
+- Each sample verifies 64 openings at distinct random positions, the same for both columns.
+- The table divides by 64, so it shows one opening: the record's leaf hash plus the path to the root.
+- Trees: 2^10 and 2^20 records of 256 B, and 2^10 records of 65,664 B.
+- Criterion: 0.5 s warm-up, 2 s measurement, 100 samples.
 
 | Hash | Record | Records | Standard per opening | T8 per opening | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|
@@ -107,7 +169,7 @@ Counted, not timed. A tree of N records adds the same N - 1 node calls to both l
 | SHA-256 | 256 B | 2^20 | 995 ns ±0.5% | 915 ns ±0.1% | **1.087x** | 1.087x |
 | SHA-256 | 65,664 B | 2^10 | 24.7 µs ±0.0% | 22.8 µs ±0.2% | **1.083x** | 1.166x |
 
-## Reading the numbers
+## Notes
 
 - BLAKE3 keeps T8's three roles apart with its counter and flags: the construction as analysed.
 - BLAKE2s keeps them apart with counters 1, 2 and 3 and the final flag clear, which no plain BLAKE2s call uses.
