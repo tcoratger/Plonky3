@@ -15,6 +15,7 @@ from pathlib import Path
 # - notes: host-specific lines of the closing notes.
 PLATFORMS = {
     "x86-avx512": {
+        "title": "T8 leaves on Plonky3",
         "pin": "taskset -c 4 ",
         "threads": 32,
         "pin_note": "`taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.",
@@ -30,10 +31,21 @@ PLATFORMS = {
         ],
     },
     "mac-neon": {
+        "title": "T8 leaves on Plonky3: Apple silicon, NEON and SHA-2",
         "pin": "",
         "threads": 10,
         "pin_note": "macOS has no core pinning, so single-threaded runs are left to the scheduler, which keeps a busy thread on a performance core.",
-        "notes": [],
+        "notes": [
+            "The build targets the host CPU: SHA-256 batches four streams of the ARMv8 SHA-2 extension, BLAKE3 and BLAKE2s sixteen NEON lanes.",
+            "Batched SHA-256 leaves follow the call ratio exactly: both leaves wait on the same SHA-2 unit, four streams deep.",
+            "One SHA-256 record runs its calls a and b as two streams, so a stage waits on two calls, not three.",
+            "So single SHA-256 records, and verification of 64 KiB-class records, beat the call ratio.",
+            "Batched BLAKE3 and BLAKE2s leaves fall short of the call ratio: each out-of-line T8 call costs a little more than a call inside the standard chunk loop.",
+            "Their loads and transposes are hidden: with them removed, the BLAKE3 T8 batch time does not change.",
+            "On one thread, SHA-256 commitment follows the call ratio, and BLAKE3 and BLAKE2s land a little below it, as their batched leaves do.",
+            "On all 10 cores, trees of 256-byte records keep most of the call saving, unlike on the 32 threads of the x86 host.",
+            "A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.5x rows.",
+        ],
     },
 }
 
@@ -264,7 +276,7 @@ def main(results: Path, platform: str) -> None:
         if root.exists():
             data.update(load(root))
 
-    print("# T8 leaves on Plonky3\n")
+    print(f"# {PLATFORM['title']}\n")
     print("Each hash's standard Merkle leaf against its T8 leaf, on the same compression kernel, inside an unchanged Plonky3 tree.\n")
     print("## How to reproduce\n")
     print("From the repository root, on the `t8-leaves` branch:\n")

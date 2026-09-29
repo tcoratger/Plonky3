@@ -1,0 +1,8 @@
+date: 2026-09-29T17:07:20+02:00
+commit: 997732a5360817c23c0e3ed01f5e000f6bf9790b
+cpu: Apple M1 Pro
+kernel: 25.6.0
+rustc: rustc 1.98.0-nightly (9e2abe0c6 2026-06-16)
+RUSTFLAGS: -Ctarget-cpu=native
+governor: n/a (macOS)
+boost: n/a (macOS)
