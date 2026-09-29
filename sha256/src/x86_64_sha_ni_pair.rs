@@ -49,7 +49,12 @@ struct Stream {
     w: [__m128i; 4],
 }
 
+/// A 64-byte block given as its two 32-byte halves, which need not be adjacent.
+pub(crate) type Halves<'a> = [&'a [u8; 32]; 2];
+
 /// Two SHA-256 compressions of full 64-byte blocks, from any two chaining values.
+///
+/// Each block is read in place from its two halves.
 ///
 /// Returns the two new chaining values, feed-forward included.
 ///
@@ -58,19 +63,20 @@ struct Stream {
 /// The running CPU has SHA-NI and SSE4.1.
 #[target_feature(enable = "sha,sse4.1")]
 pub(crate) unsafe fn compress_pair(
-    a: (&Words, &[u8; 64]),
-    b: (&Words, &[u8; 64]),
+    a: (&Words, Halves<'_>),
+    b: (&Words, Halves<'_>),
 ) -> (Words, Words) {
     // SAFETY: `[u8; 16]` and `__m128i` have the same size, and every bit pattern is valid.
     let reverse = unsafe { core::mem::transmute::<[u8; 16], __m128i>(REVERSE_BYTES) };
 
     // State words into SHA-NI order, and the block as four big-endian vectors.
-    let open = |(h, block): (&Words, &[u8; 64])| Stream {
+    let open = |(h, block): (&Words, Halves<'_>)| Stream {
         abef: _mm_set_epi32(h[0] as i32, h[1] as i32, h[4] as i32, h[5] as i32),
         cdgh: _mm_set_epi32(h[2] as i32, h[3] as i32, h[6] as i32, h[7] as i32),
-        // SAFETY: four 16-byte reads inside the 64-byte block.
+        // SAFETY: two 16-byte reads inside each 32-byte half.
         w: core::array::from_fn(|k| unsafe {
-            _mm_shuffle_epi8(_mm_loadu_si128(block.as_ptr().add(16 * k).cast()), reverse)
+            let half = block[k / 2].as_ptr().add(16 * (k % 2));
+            _mm_shuffle_epi8(_mm_loadu_si128(half.cast()), reverse)
         }),
     };
     let mut s = [open(a), open(b)];

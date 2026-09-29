@@ -224,7 +224,12 @@ fn stage(z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     let (a, b) = if crate::x86_64_sha_ni_pair::supported() {
         // SAFETY: the CPU check above found SHA-NI and SSE4.1.
-        unsafe { crate::x86_64_sha_ni_pair::compress_pair((&z1, block(0)), (&z4, block(96))) }
+        unsafe {
+            crate::x86_64_sha_ni_pair::compress_pair(
+                (&z1, halves(block(0))),
+                (&z4, halves(block(96))),
+            )
+        }
     } else {
         (compress(z1, block(0)), compress(z4, block(96)))
     };
@@ -239,6 +244,17 @@ fn stage(z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
     let c = compress(core::array::from_fn(|i| a[i] ^ z7[i]), &last);
 
     core::array::from_fn(|i| c[i] ^ z7[i])
+}
+
+/// The two 32-byte halves of a 64-byte block.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline(always)]
+fn halves(block: &[u8; 64]) -> [&[u8; 32]; 2] {
+    let (lo, hi) = block.split_at(32);
+    [
+        lo.try_into().expect("32 bytes"),
+        hi.try_into().expect("32 bytes"),
+    ]
 }
 
 /// Read 32 bytes as eight big-endian words, the order SHA-256 uses.

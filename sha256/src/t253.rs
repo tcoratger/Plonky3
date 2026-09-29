@@ -175,45 +175,53 @@ impl CryptographicHasher<u8, [u8; 32]> for T253Sha256 {
 /// ```
 #[inline]
 fn stage(s: &[u8; 32], fresh: &[u8; STAGE_STRIDE]) -> [u8; 32] {
-    let at = |start: usize, len: usize| &fresh[start..start + len];
+    let half = |start: usize| -> &[u8; 32] { fresh[start..][..32].try_into().expect("in range") };
 
-    // A chaining value: the role tag, then 31 payload bytes.
-    let tagged = |role: u8, payload: &[u8]| -> Words {
-        let mut cv = [0u8; 32];
-        cv[0] = role;
-        cv[1..].copy_from_slice(payload);
-        words(&cv)
+    // A chaining value straight as words: the role tag and three payload bytes, then words from byte 3 on.
+    //
+    //     word 0 = role || u[0] u[1] u[2],   word i = u[4i - 1 .. 4i + 3]
+    let tagged = |role: u8, start: usize| -> Words {
+        let u = &fresh[start..start + 31];
+        core::array::from_fn(|i| {
+            if i == 0 {
+                u32::from_be_bytes([role, u[0], u[1], u[2]])
+            } else {
+                u32::from_be_bytes(u[4 * i - 1..4 * i + 3].try_into().expect("in range"))
+            }
+        })
     };
 
-    // The first call's block: the chained value, then y_3.
-    let mut m1 = [0u8; 64];
-    m1[..32].copy_from_slice(s);
-    m1[32..].copy_from_slice(at(31, 32));
-    let m2: &[u8; 64] = at(94, 64).try_into().expect("in range");
-
-    // The two independent calls, as two SHA-NI streams when the CPU has them.
-    let (cv1, cv2) = (tagged(ROLES[0], at(0, 31)), tagged(ROLES[1], at(63, 31)));
-    let (a, b) = pair((&cv1, &m1), (&cv2, m2));
+    // The two independent calls, blocks read in place: s || y_3, and m_2.
+    let (cv1, cv2) = (tagged(ROLES[0], 0), tagged(ROLES[1], 63));
+    let (a, b) = pair((&cv1, [s, half(31)]), (&cv2, [half(94), half(126)]));
 
     // The last call: block (a ^ z_7) || (b ^ z_7), then the output masked with z_7 again.
-    let z7 = words(at(158, 32).try_into().expect("in range"));
+    let z7 = words(half(158));
     let mut m3 = [0u8; 64];
     m3[..32].copy_from_slice(&bytes(&core::array::from_fn(|i| a[i] ^ z7[i])));
     m3[32..].copy_from_slice(&bytes(&core::array::from_fn(|i| b[i] ^ z7[i])));
-    let c = compress(tagged(ROLES[2], at(190, 31)), &m3);
+    let c = compress(tagged(ROLES[2], 190), &m3);
 
     bytes(&core::array::from_fn(|i| c[i] ^ z7[i]))
 }
 
-/// The two independent calls of a stage.
+/// The two independent calls of a stage, each block given as its two 32-byte halves.
 #[inline]
-fn pair(a: (&Words, &[u8; 64]), b: (&Words, &[u8; 64])) -> (Words, Words) {
+fn pair(a: (&Words, [&[u8; 32]; 2]), b: (&Words, [&[u8; 32]; 2])) -> (Words, Words) {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     if crate::x86_64_sha_ni_pair::supported() {
         // SAFETY: the CPU check above found SHA-NI and SSE4.1.
         return unsafe { crate::x86_64_sha_ni_pair::compress_pair(a, b) };
     }
-    (compress(*a.0, a.1), compress(*b.0, b.1))
+
+    // One call after the other, through `sha2`, each block joined first.
+    let join = |[lo, hi]: [&[u8; 32]; 2]| {
+        let mut block = [0u8; 64];
+        block[..32].copy_from_slice(lo);
+        block[32..].copy_from_slice(hi);
+        block
+    };
+    (compress(*a.0, &join(a.1)), compress(*b.0, &join(b.1)))
 }
 
 /// One SHA-256 compression without padding, through `sha2`.
