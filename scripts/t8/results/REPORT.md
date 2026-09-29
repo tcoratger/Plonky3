@@ -55,20 +55,26 @@ boost: 1
 
 Counted, not timed. A tree of N records adds the same N - 1 node calls to both leaves.
 
-| Hash | Record | Standard calls | T8 calls | Reduction |
+| Hash | Record | Standard calls | T8 calls | T8 against standard |
 |---|---:|---:|---:|---:|
-| BLAKE3 | 256 B | 4 | 3 | +25.0% |
-| BLAKE3 | 480 B | 8 | 6 | +25.0% |
-| BLAKE3 | 65,664 B | 1,090 | 879 | +19.4% |
-| BLAKE2s | 256 B | 4 | 3 | +25.0% |
-| BLAKE2s | 480 B | 8 | 6 | +25.0% |
-| BLAKE2s | 65,664 B | 1,026 | 879 | +14.3% |
-| SHA-256 | 256 B | 5 | 3 | +40.0% |
-| SHA-256 | 480 B | 8 | 6 | +25.0% |
-| SHA-256 | 65,664 B | 1,027 | 879 | +14.4% |
-| Keccak-256 | 256 B | 2 | 3 | -50.0% |
-| Keccak-256 | 480 B | 4 | 6 | -50.0% |
-| Keccak-256 | 65,664 B | 483 | 879 | -82.0% |
+| BLAKE3 | 256 B | 4 | 3 | 25.0% fewer |
+| BLAKE3 | 480 B | 8 | 6 | 25.0% fewer |
+| BLAKE3 | 65,664 B | 1,090 | 879 | 19.4% fewer |
+| BLAKE2s | 256 B | 4 | 3 | 25.0% fewer |
+| BLAKE2s | 480 B | 8 | 6 | 25.0% fewer |
+| BLAKE2s | 65,664 B | 1,026 | 879 | 14.3% fewer |
+| SHA-256 | 256 B | 5 | 3 | 40.0% fewer |
+| SHA-256 | 480 B | 8 | 6 | 25.0% fewer |
+| SHA-256 | 65,664 B | 1,027 | 879 | 14.4% fewer |
+| Keccak-256 | 256 B | 2 | 3 | 50.0% more |
+| Keccak-256 | 480 B | 4 | 6 | 50.0% more |
+| Keccak-256 | 65,664 B | 483 | 879 | 82.0% more |
+
+Keccak-256 is slower with T8, and SHA3-256 would be the same: both run Keccak-f with a 136-byte rate.
+
+- One permutation already takes in 136 fresh bytes, so a plain hash covers 256 B in 2 calls.
+- Each T8 call is a 96-byte function, so it uses only 96 of those 136 bytes and needs 3 calls.
+- T8 pays off only when one call takes about 96 bytes, as the BLAKE3, BLAKE2s and SHA-256 compressions do.
 
 ## Measured
 

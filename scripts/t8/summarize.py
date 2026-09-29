@@ -79,13 +79,14 @@ def env(results: Path) -> str:
 def calls_table() -> str:
     """Counted calls per record, for every hash including those T8 does not help."""
     rows = [
-        "| Hash | Record | Standard calls | T8 calls | Reduction |",
+        "| Hash | Record | Standard calls | T8 calls | T8 against standard |",
         "|---|---:|---:|---:|---:|",
     ]
     for key, name in HASHES.items():
         for length in RECORDS:
             s, t = standard_leaf(key, length), t8_leaf(length)
-            rows.append(f"| {name} | {length:,} B | {s:,} | {t:,} | {100 * (1 - t / s):+.1f}% |")
+            change = f"{100 * (1 - t / s):.1f}% fewer" if t <= s else f"{100 * (t / s - 1):.1f}% more"
+            rows.append(f"| {name} | {length:,} B | {s:,} | {t:,} | {change} |")
     return "\n".join(rows)
 
 
@@ -258,6 +259,10 @@ def main(results: Path) -> None:
     print("Counted, not timed. A tree of N records adds the same N - 1 node calls to both leaves.\n")
     print(calls_table())
     print()
+    print("Keccak-256 is slower with T8, and SHA3-256 would be the same: both run Keccak-f with a 136-byte rate.\n")
+    print("- One permutation already takes in 136 fresh bytes, so a plain hash covers 256 B in 2 calls.")
+    print("- Each T8 call is a 96-byte function, so it uses only 96 of those 136 bytes and needs 3 calls.")
+    print("- T8 pays off only when one call takes about 96 bytes, as the BLAKE3, BLAKE2s and SHA-256 compressions do.\n")
     for build in ("default", "native"):
         if any(k[0] == build for k in data):
             print("## Measured\n")
