@@ -370,7 +370,7 @@ def main(results: Path, platform: str) -> None:
     for build in ("native",):
         if any(k[0] == build and k[1].startswith("arity/") for k in data):
             print("## Wider tree nodes\n")
-            print(f"Command: `RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_arity`, then again on every thread.\n")
+            print(f"Command: `RAYON_NUM_THREADS=1 {PLATFORM['pin']}{BENCH} --bench t8_arity`, then again on every thread.\n")
             print("- Code: `merkle-tree/benches/t8_arity.rs`, the same Plonky3 tree with arity 2 and arity 4.")
             print("- Leaves: the standard hash of 256-byte records, identical in both columns.")
             print("- A 4-ary Keccak-256 or SHA3-256 node fits in one permutation; a 4-ary BLAKE3 node takes two compressions.")
