@@ -79,7 +79,7 @@ for build in native; do
     } > "$OUT/env-$build.txt"
 
     # Build first, under the shared lock.
-    locked -s "${bench[@]}" --bench t8_leaf --bench t8_verify --bench t8_commit --no-run
+    locked -s "${bench[@]}" --bench t8_leaf --bench t8_verify --bench t8_commit --bench t8_arity --no-run
 
     # One core: leaf hashing and verification.
     locked -x ${PIN[@]+"${PIN[@]}"} "${bench[@]}" --bench t8_leaf -- --noplot --save-baseline "$build"
@@ -90,6 +90,12 @@ for build in native; do
         "${bench[@]}" --bench t8_commit -- --noplot --save-baseline "$build"
     locked -x env RAYON_NUM_THREADS="$(threads)" \
         "${bench[@]}" --bench t8_commit -- --noplot --save-baseline "$build"
+
+    # Wider nodes: binary against 4-ary trees over standard leaves, on one thread and on all of them.
+    locked -x env RAYON_NUM_THREADS=1 ${PIN[@]+"${PIN[@]}"} \
+        "${bench[@]}" --bench t8_arity -- --noplot --save-baseline "$build"
+    locked -x env RAYON_NUM_THREADS="$(threads)" \
+        "${bench[@]}" --bench t8_arity -- --noplot --save-baseline "$build"
 
     # Keep the raw estimates next to the report.
     rm -rf "$OUT/criterion-$build"

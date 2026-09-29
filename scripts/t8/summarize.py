@@ -90,6 +90,47 @@ def tree_calls(hash_name: str, length: int, log: int, kind: str) -> tuple[int, i
     return s + log, t + log
 
 
+# Wider nodes: (standard leaf calls for a 256-byte record, calls per 4-ary node), per hash.
+ARITY = {"keccak": ("Keccak-256", 2, 1), "sha3": ("SHA3-256", 2, 1), "blake3": ("BLAKE3", 4, 2)}
+
+
+def arity_calls(key: str, log: int) -> dict[str, tuple[int, int, int]]:
+    """(commit calls, verify calls, proof digests) of the binary and the 4-ary tree over 2^log leaves."""
+    _, leaf, node4 = ARITY[key]
+    n = 1 << log
+    return {
+        "binary": (n * leaf + (n - 1), leaf + log, log),
+        "quaternary": (n * leaf + (n - 1) // 3 * node4, leaf + log // 2 * node4, 3 * (log // 2)),
+    }
+
+
+def arity_table(data: dict, build: str) -> str:
+    """Binary against 4-ary trees, over the same standard 256-byte leaves."""
+    rows = [
+        "| Hash | Records | Operation | Binary | 4-ary | Speedup | Calls, binary / 4-ary | Proof digests, binary / 4-ary |",
+        "|---|---:|---|---:|---:|---:|---:|---:|",
+    ]
+    entries = []
+    for (b, group, value), per in data.items():
+        if b != build or not group.startswith("arity/") or len(per) < 2:
+            continue
+        parts = group.split("/")
+        threads = int(parts[3][:-1]) if parts[2] != "verify" else 0
+        op = "verify" if parts[2] == "verify" else f"commit, {threads} thread{'s' if threads > 1 else ''}"
+        entries.append((list(ARITY).index(parts[1]), parts[1], int(value.split("^")[1]), op, per))
+    for _, key, log, op, per in sorted(entries):
+        bn, qu = per["binary"], per["quaternary"]
+        calls = arity_calls(key, log)
+        which = 1 if op == "verify" else 0
+        scale = 64 if op == "verify" else 1
+        rows.append(
+            f"| {ARITY[key][0]} | 2^{log} | {op} | {fmt_time(bn[0] / scale)} | {fmt_time(qu[0] / scale)} |"
+            f" **{bn[0] / qu[0]:.3f}x** | {calls['binary'][which]:,} / {calls['quaternary'][which]:,} |"
+            f" {calls['binary'][2]} / {calls['quaternary'][2]} |"
+        )
+    return "\n".join(rows)
+
+
 def fmt_time(ns: float) -> str:
     """Nanoseconds in the unit that keeps three significant digits readable."""
     for unit, scale in (("s", 1e9), ("ms", 1e6), ("µs", 1e3)):
@@ -325,6 +366,17 @@ def main(results: Path, platform: str) -> None:
         if any(k[0] == build for k in data):
             print("## Measured\n")
             print(measured(data, build))
+            print()
+    for build in ("native",):
+        if any(k[0] == build and k[1].startswith("arity/") for k in data):
+            print("## Wider tree nodes\n")
+            print(f"Command: `RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_arity`, then again on every thread.\n")
+            print("- Code: `merkle-tree/benches/t8_arity.rs`, the same Plonky3 tree with arity 2 and arity 4.")
+            print("- Leaves: the standard hash of 256-byte records, identical in both columns.")
+            print("- A 4-ary Keccak-256 or SHA3-256 node fits in one permutation; a 4-ary BLAKE3 node takes two compressions.")
+            print("- Verification times one opening; each sample verifies 64.")
+            print("- Proof digests: siblings in one opening, 32 bytes each.\n")
+            print(arity_table(data, build))
             print()
     print("## Notes\n")
     print("- BLAKE3 keeps T8's three roles apart with its counter and flags: the construction as analysed.")

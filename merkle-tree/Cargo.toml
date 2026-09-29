@@ -76,5 +76,9 @@ harness = false
 name = "t8_verify"
 harness = false
 
+[[bench]]
+name = "t8_arity"
+harness = false
+
 [lints]
 workspace = true
