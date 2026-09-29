@@ -16,6 +16,7 @@
 //! Plain loops fill the arrays instead, and inline in every build.
 
 mod rounds;
+pub(crate) mod t8;
 
 use core::arch::x86_64::*;
 
