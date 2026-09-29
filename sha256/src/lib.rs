@@ -68,6 +68,10 @@ use wasm32_simd128::Simd128 as Backend;
 ))]
 use x86_64_sha_ni::ShaNi as Backend;
 
+pub mod t8;
+
+pub use crate::t8::T8Sha256;
+
 pub const H256_256: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];

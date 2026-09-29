@@ -6,6 +6,7 @@
 
 mod compress;
 mod lanes;
+pub(crate) mod t8;
 
 use self::compress::{
     BLOCK_BYTES, BLOCK_WORDS, PARAM_BLOCK_0, STATE_WORDS, compress, initial_state,

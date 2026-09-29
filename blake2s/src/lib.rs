@@ -30,9 +30,29 @@ mod tests;
 )]
 mod batch;
 
+#[cfg(any(
+    target_arch = "x86_64",
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )
+))]
+pub mod t8;
+
 use blake2::digest::consts::U32;
 use blake2::{Blake2s, Digest};
 use p3_symmetric::CryptographicHasher;
+
+#[cfg(any(
+    target_arch = "x86_64",
+    all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_endian = "little"
+    )
+))]
+pub use crate::t8::T8Blake2s;
 
 /// Messages one batched compression advances at once.
 ///

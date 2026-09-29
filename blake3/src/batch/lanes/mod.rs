@@ -53,6 +53,15 @@ macro_rules! out_of_line_steps {
             $crate::batch::chunk::<Self, $w, G>(mode, lanes, len, index, root)
         }
 
+        $(#[target_feature(enable = $feature)])?
+        unsafe fn t8_group<const G: usize>(
+            lanes: &$crate::batch::Lanes<'_, $w, G>,
+            stages: usize,
+            out: &mut [[[u8; blake3::OUT_LEN]; $w]; G],
+        ) {
+            $crate::batch::t8::group::<Self, $w, G>(lanes, stages, out)
+        }
+
         #[inline(never)]
         $(#[target_feature(enable = $feature)])?
         unsafe fn parent<const G: usize>(
@@ -178,6 +187,8 @@ pub(crate) struct Kernel {
     supported: fn() -> bool,
     /// The driver compiled for the backend, sound to call only when `supported` holds.
     run: unsafe fn(Mode, &[u8], usize, &mut [[u8; OUT_LEN]]),
+    /// The T8 leaf driver compiled for the backend, under the same condition.
+    run_t8: unsafe fn(&[u8], usize, &mut [[u8; OUT_LEN]]),
 }
 
 impl Kernel {
@@ -190,6 +201,7 @@ impl Kernel {
             lanes: W * G,
             supported: V::supported,
             run: super::hash_many_with::<V, W, G>,
+            run_t8: super::t8::hash_many_with::<V, W, G>,
         }
     }
 
@@ -200,6 +212,15 @@ impl Kernel {
     pub(crate) fn hash_many(self, mode: Mode, input: &[u8], len: usize, out: &mut [[u8; OUT_LEN]]) {
         // SAFETY: kernels only leave this module through `supported`, which checks the CPU.
         unsafe { (self.run)(mode, input, len, out) }
+    }
+
+    /// T8-hash equal-length records of `len` bytes laid end to end in `input`.
+    ///
+    /// The caller guarantees `input.len() == len * out.len()` and a T8 record length.
+    #[inline]
+    pub(crate) fn hash_many_t8(self, input: &[u8], len: usize, out: &mut [[u8; OUT_LEN]]) {
+        // SAFETY: kernels only leave this module through `supported`, which checks the CPU.
+        unsafe { (self.run_t8)(input, len, out) }
     }
 }
 
@@ -334,6 +355,17 @@ pub(super) trait Backend<const W: usize>: Word {
         right: &State<Self, G>,
         root: u32,
     ) -> State<Self, G>;
+
+    /// The T8 group step, compiled with this backend's target features.
+    ///
+    /// # Safety
+    ///
+    /// The running CPU has this backend's target features.
+    unsafe fn t8_group<const G: usize>(
+        lanes: &Lanes<'_, W, G>,
+        stages: usize,
+        out: &mut [[[u8; OUT_LEN]; W]; G],
+    );
 }
 
 /// Every lane of one vector, in lane order.
