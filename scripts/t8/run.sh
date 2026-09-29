@@ -7,19 +7,47 @@
 #
 # Usage: scripts/t8/run.sh
 #
-# Results go to scripts/t8/results: the environment, the raw criterion estimates and REPORT.md.
+# The host picks the platform: x86-avx512 on Linux, mac-neon on macOS.
+#
+# Results go to scripts/t8/results/<platform>: the environment, the raw criterion estimates and REPORT.md.
 
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 WT=$(cd "$HERE/../.." && pwd)
-OUT=$HERE/results
+
+# The core that single-threaded benchmarks are pinned to.
+CORE=${CORE:-4}
+
+# Linux pins single-threaded runs with taskset and serializes runs with flock.
+#
+# macOS has neither, so runs there go unpinned and unlocked.
+case "$(uname -s)" in
+    Darwin)
+        PLATFORM=${PLATFORM:-mac-neon}
+        PIN=()
+        locked() { shift; "$@"; }
+        cpu() { sysctl -n machdep.cpu.brand_string; }
+        threads() { sysctl -n hw.ncpu; }
+        governor() { echo "n/a (macOS)"; }
+        boost() { echo "n/a (macOS)"; }
+        ;;
+    *)
+        PLATFORM=${PLATFORM:-x86-avx512}
+        PIN=(taskset -c "$CORE")
+        locked() { local mode=$1; shift; flock "$mode" "$LOCK" "$@"; }
+        cpu() { grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs; }
+        threads() { nproc; }
+        governor() { cat /sys/devices/system/cpu/cpu$CORE/cpufreq/scaling_governor 2>/dev/null || echo unknown; }
+        boost() { cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo unknown; }
+        ;;
+esac
+
+OUT=$HERE/results/$PLATFORM
 
 # Benchmarks take this lock exclusively and builds take it shared, so no build disturbs a measurement.
 LOCK=${LOCK:-$OUT/.lock}
 
-# The core that single-threaded benchmarks are pinned to.
-CORE=${CORE:-4}
 
 mkdir -p "$OUT"
 touch "$LOCK"
@@ -32,27 +60,27 @@ for build in native; do
 
     # The environment of this build.
     {
-        echo "date: $(date -Iseconds)"
+        echo "date: $(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)"
         echo "commit: $(git rev-parse HEAD)$(git diff --quiet HEAD -- . ":!scripts/t8/results" || echo " + local changes")"
-        echo "cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+        echo "cpu: $(cpu)"
         echo "kernel: $(uname -r)"
         echo "rustc: $(rustc --version)"
         echo "RUSTFLAGS: ${RUSTFLAGS:-<none>}"
-        echo "governor: $(cat /sys/devices/system/cpu/cpu$CORE/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
-        echo "boost: $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo unknown)"
+        echo "governor: $(governor)"
+        echo "boost: $(boost)"
     } > "$OUT/env-$build.txt"
 
     # Build first, under the shared lock.
-    flock -s "$LOCK" "${bench[@]}" --bench t8_leaf --bench t8_verify --bench t8_commit --no-run
+    locked -s "${bench[@]}" --bench t8_leaf --bench t8_verify --bench t8_commit --no-run
 
     # One core: leaf hashing and verification.
-    flock -x "$LOCK" taskset -c "$CORE" "${bench[@]}" --bench t8_leaf -- --noplot --save-baseline "$build"
-    flock -x "$LOCK" taskset -c "$CORE" "${bench[@]}" --bench t8_verify -- --noplot --save-baseline "$build"
+    locked -x ${PIN[@]+"${PIN[@]}"} "${bench[@]}" --bench t8_leaf -- --noplot --save-baseline "$build"
+    locked -x ${PIN[@]+"${PIN[@]}"} "${bench[@]}" --bench t8_verify -- --noplot --save-baseline "$build"
 
     # Commitment on one pinned thread, then on every hardware thread.
-    RAYON_NUM_THREADS=1 flock -x "$LOCK" taskset -c "$CORE" \
+    locked -x env RAYON_NUM_THREADS=1 ${PIN[@]+"${PIN[@]}"} \
         "${bench[@]}" --bench t8_commit -- --noplot --save-baseline "$build"
-    RAYON_NUM_THREADS=$(nproc) flock -x "$LOCK" \
+    locked -x env RAYON_NUM_THREADS="$(threads)" \
         "${bench[@]}" --bench t8_commit -- --noplot --save-baseline "$build"
 
     # Keep the raw estimates next to the report.
@@ -60,5 +88,5 @@ for build in native; do
     cp -r "$CARGO_TARGET_DIR/criterion" "$OUT/criterion-$build"
 done
 
-python3 "$HERE/summarize.py" "$OUT" > "$OUT/REPORT.md"
+python3 "$HERE/summarize.py" "$OUT" "$PLATFORM" > "$OUT/REPORT.md"
 echo "wrote $OUT/REPORT.md"

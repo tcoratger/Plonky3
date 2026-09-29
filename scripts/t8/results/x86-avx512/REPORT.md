@@ -27,7 +27,7 @@ RAYON_NUM_THREADS=32 cargo bench -p p3-merkle-tree --features parallel --profile
 - `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.
 - Criterion prints `time: [low median high]`, the 95% interval of the median.
 - It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.
-- The script saves them as the baseline `native`, copies them to `scripts/t8/results/`, and builds this report from them.
+- The script saves them as the baseline `native`, copies them to `scripts/t8/results/x86-avx512/`, and builds this report from them.
 
 ## Reading the tables
 
