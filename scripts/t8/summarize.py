@@ -278,8 +278,8 @@ def main(results: Path) -> None:
     print("- Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.")
     print("- So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.")
     print("- On one thread, commitment follows the call ratio.")
-    print("- On 32 threads it does not: every thread waits on memory, so fewer calls barely shows.")
-    print("- On this Plonky3 commit the tree still copies each row before hashing it, which doubles that memory traffic.")
+    print("- On 32 threads, trees of 256-byte records wait on memory, so fewer calls barely shows.")
+    print("- Trees of 64 KiB-class records stay compute-bound on 32 threads, and keep most of the call saving.")
     print("- A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.")
 
 
