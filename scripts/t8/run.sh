@@ -56,7 +56,14 @@ cd "$WT"
 for build in native; do
     export RUSTFLAGS="-Ctarget-cpu=native"
     export CARGO_TARGET_DIR="$WT/target/bench-$build"
-    bench=(cargo bench -p p3-merkle-tree --features parallel --profile optimized)
+    # On AArch64, `p3-blake3/neon` gives the one-message BLAKE3 path its NEON code.
+    #
+    # Without it, one standard BLAKE3 message runs portable code, while the batched paths use NEON anyway.
+    case "$(uname -m)" in
+        arm64 | aarch64) FEATURES=parallel,p3-blake3/neon ;;
+        *) FEATURES=parallel ;;
+    esac
+    bench=(cargo bench -p p3-merkle-tree --features "$FEATURES" --profile optimized)
 
     # The environment of this build.
     {
@@ -66,6 +73,7 @@ for build in native; do
         echo "kernel: $(uname -r)"
         echo "rustc: $(rustc --version)"
         echo "RUSTFLAGS: ${RUSTFLAGS:-<none>}"
+        echo "features: $FEATURES"
         echo "governor: $(governor)"
         echo "boost: $(boost)"
     } > "$OUT/env-$build.txt"
