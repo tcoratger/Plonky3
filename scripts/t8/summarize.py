@@ -89,6 +89,47 @@ def calls_table() -> str:
     return "\n".join(rows)
 
 
+# Every benchmark command shares this prefix, run from the repository root.
+BENCH = "cargo bench -p p3-merkle-tree --features parallel --profile optimized"
+
+# What produced each table: the command, then its parameters.
+LEAF_BATCH = f"""Command: `taskset -c 4 {BENCH} --bench t8_leaf -- 'leaf/.*/batch'`
+
+- Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_many` call over the whole batch, on one thread.
+- Batches: 2^16 records of 256 B, 2^15 of 480 B, 2^8 of 65,664 B, so 16 MiB each.
+- Input: deterministic xorshift bytes, generated before timing.
+- Criterion: 1 s warm-up, 3 s measurement, 100 samples.
+"""
+
+LEAF_SINGLE = f"""Command: `taskset -c 4 {BENCH} --bench t8_leaf -- 'leaf/.*/single'`
+
+- Code: `merkle-tree/benches/t8_leaf.rs`, one `hash_slice` call on one record, the path a verifier takes.
+- Records: 256 B, 480 B and 65,664 B.
+- Criterion: 0.5 s warm-up, 2 s measurement, 100 samples.
+"""
+
+COMMIT = f"""Commands:
+
+- one thread: `RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_commit`
+- every hardware thread: `RAYON_NUM_THREADS=32 {BENCH} --bench t8_commit`
+
+- Code: `merkle-tree/benches/t8_commit.rs`, one `MerkleTree::new` over a borrowed byte matrix, one record per row.
+- Timing covers leaf hashing, node hashing, and the digest layers' allocation and release.
+- Trees: 2^16 and 2^20 records of 256 B, and 2^10 records of 65,664 B.
+- Nodes: BLAKE3 or BLAKE2s of the 64 child bytes, or one SHA-256 compression, the same in both columns.
+- Criterion: 1 s warm-up, 3 s measurement, 10 samples.
+"""
+
+VERIFY = f"""Command: `taskset -c 4 {BENCH} --bench t8_verify`
+
+- Code: `merkle-tree/benches/t8_verify.rs`, `MerkleTreeMmcs::verify_batch` on prepared openings, cap height 0.
+- Each sample verifies 64 openings at distinct random positions, the same for both columns.
+- The table divides by 64, so it shows one opening: the record's leaf hash plus the path to the root.
+- Trees: 2^10 and 2^20 records of 256 B, and 2^10 records of 65,664 B.
+- Criterion: 0.5 s warm-up, 2 s measurement, 100 samples.
+"""
+
+
 def measured(data: dict, build: str) -> str:
     """The measured tables of one build."""
     out = []
@@ -98,7 +139,7 @@ def measured(data: dict, build: str) -> str:
 
     # Leaf hashing, batched.
     rows = [
-        "| Hash | Record | Records | Standard | T8 | Standard GiB/s | T8 GiB/s | Speedup | Call ratio |",
+        "| Hash | Record | Records | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for key in HASHES:
@@ -114,7 +155,7 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {cell(s)} | {cell(t)} |"
                 f" {bytes_ / s[0]:.2f} | {bytes_ / t[0]:.2f} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |"
             )
-    out.append("**Leaf hashing, batched, one core** (GiB/s counts record bytes; 1 GiB/s = 1.074 B/ns)\n\n" + "\n".join(rows))
+    out.append("### Leaf hashing, batched, one core\n\n" + LEAF_BATCH + "\n" + "\n".join(rows))
 
     # Leaf hashing, one record at a time.
     rows = [
@@ -129,11 +170,11 @@ def measured(data: dict, build: str) -> str:
             s, t = per["standard"], per["t8"]
             ratio = standard_leaf(key, length) / t8_leaf(length)
             rows.append(f"| {HASHES[key]} | {length:,} B | {cell(s)} | {cell(t)} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |")
-    out.append("**Leaf hashing, one record, one core** (the verifier's leaf)\n\n" + "\n".join(rows))
+    out.append("### Leaf hashing, one record, one core\n\n" + LEAF_SINGLE + "\n" + "\n".join(rows))
 
     # Commitment.
     rows = [
-        "| Hash | Record | Records | Threads | Standard | T8 | Standard GiB/s | T8 GiB/s | Speedup | Call ratio |",
+        "| Hash | Record | Records | Threads | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for key in HASHES:
@@ -151,7 +192,7 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {threads} | {cell(s)} | {cell(t)} |"
                 f" {bytes_ / s[0]:.2f} | {bytes_ / t[0]:.2f} | **{s[0] / t[0]:.3f}x** | {cs / ct:.3f}x |"
             )
-    out.append("**Commitment: one full tree**\n\n" + "\n".join(rows))
+    out.append("### Commitment: one full tree\n\n" + COMMIT + "\n" + "\n".join(rows))
 
     # Verification.
     rows = [
@@ -172,7 +213,7 @@ def measured(data: dict, build: str) -> str:
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {cell(per_open(s))} | {cell(per_open(t))} |"
                 f" **{s[0] / t[0]:.3f}x** | {cs / ct:.3f}x |"
             )
-    out.append("**Verification: one opening, one core** (64 openings per sample)\n\n" + "\n".join(rows))
+    out.append("### Verification: one opening, one core\n\n" + VERIFY + "\n" + "\n".join(rows))
     return "\n\n".join(out)
 
 
@@ -184,9 +225,33 @@ def main(results: Path) -> None:
             data.update(load(root))
 
     print("# T8 leaves on Plonky3\n")
-    print("Each hash's standard leaf against T8 on the same compression kernel, inside an unchanged Plonky3 tree.\n")
-    print("Times are criterion medians with the half-width of their 95% interval.\n")
-    print("Speedup is standard time over T8 time; the call ratio is what counting compressions predicts.\n")
+    print("Each hash's standard Merkle leaf against its T8 leaf, on the same compression kernel, inside an unchanged Plonky3 tree.\n")
+    print("## How to reproduce\n")
+    print("From the repository root, on the `t8-leaves` branch:\n")
+    print("```sh")
+    print("# Everything below, then this report, in about 8 minutes.")
+    print("scripts/t8/run.sh")
+    print("```\n")
+    print("Or one table at a time, reading the numbers criterion prints:\n")
+    print("```sh")
+    print("export RUSTFLAGS=-Ctarget-cpu=native")
+    print(f"taskset -c 4 {BENCH} --bench t8_leaf")
+    print(f"taskset -c 4 {BENCH} --bench t8_verify")
+    print(f"RAYON_NUM_THREADS=1 taskset -c 4 {BENCH} --bench t8_commit")
+    print(f"RAYON_NUM_THREADS=32 {BENCH} --bench t8_commit")
+    print("```\n")
+    print("- Every command in this report assumes `RUSTFLAGS=-Ctarget-cpu=native`, as exported above.")
+    print("- A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.")
+    print("- `taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.")
+    print("- `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.")
+    print("- Criterion prints `time: [low median high]`, the 95% interval of the median.")
+    print("- It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.")
+    print("- The script saves them as the baseline `native`, copies them to `scripts/t8/results/`, and builds this report from them.\n")
+    print("## Reading the tables\n")
+    print("- **Standard, T8**: criterion's median time, with the half-width of its 95% interval.")
+    print("- **GB/s**: record bytes hashed per second, 1 GB = 10^9 bytes.")
+    print("- **Speedup**: standard time over T8 time, so above 1 means T8 is faster.")
+    print("- **Call ratio**: standard calls over T8 calls, what counting compressions alone predicts.\n")
     print("## Setup\n")
     print(env(results))
     print("## Compression calls per record\n")
@@ -195,10 +260,10 @@ def main(results: Path) -> None:
     print()
     for build in ("default", "native"):
         if any(k[0] == build for k in data):
-            print(f"## Measured, {build} build\n")
+            print("## Measured\n")
             print(measured(data, build))
             print()
-    print("## Reading the numbers\n")
+    print("## Notes\n")
     print("- BLAKE3 keeps T8's three roles apart with its counter and flags: the construction as analysed.")
     print("- BLAKE2s keeps them apart with counters 1, 2 and 3 and the final flag clear, which no plain BLAKE2s call uses.")
     print("- SHA-256's compression takes exactly 96 bytes, so its three calls are one function. The security analysis does not cover that instantiation.")
