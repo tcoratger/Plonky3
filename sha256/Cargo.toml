@@ -13,6 +13,9 @@ categories.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion.workspace = true
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures.workspace = true
+
 [features]
 default = []
 
@@ -21,9 +24,6 @@ p3-symmetric.workspace = true
 p3-util.workspace = true
 
 sha2.workspace = true
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-cpufeatures.workspace = true
 
 [dev-dependencies]
 hex-literal.workspace = true
