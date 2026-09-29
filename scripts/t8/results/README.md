@@ -15,11 +15,11 @@ Leaf hashing on one core, 256-byte records, standard time over T8 time:
 |---|---:|---:|---:|
 | Call ratio | 1.333x | 1.333x | 1.667x |
 | Batch, x86 AVX-512 | 1.34x | 1.39x | 1.34x |
-| Batch, M1 Pro | 1.21x | 1.21x | 1.66x |
+| Batch, M1 Pro | 1.21x | 1.26x | 1.66x |
 | One record, x86 | 2.36x | 1.36x | 1.92x |
-| One record, M1 Pro | 1.36x | 1.28x | 2.08x |
+| One record, M1 Pro | 1.36x | 1.27x | 2.36x |
 
-The M1 Pro report predates the paired calls and the NEON flag for one-message BLAKE3: rerun `run.sh` there to refresh it.
+On the M1 Pro, the standard one-record SHA-256 time rose about 10% from code layout alone when the T253 benches joined the binary; its report says more.
 
 Beside T8, each report also measures:
 
