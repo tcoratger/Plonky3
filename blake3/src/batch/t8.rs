@@ -9,7 +9,7 @@ use blake3::OUT_LEN;
 use super::compress::{CHUNK_END, CHUNK_START, STATE_WORDS, compress};
 use super::lanes::{Backend, Word, detect};
 use super::{Block, Lanes, State};
-use crate::t8::{BLOCK_BYTES, stages};
+use crate::t8::{BLOCK_BYTES, STAGE_STRIDE, stages};
 
 /// Flag of the keyed hash mode, which a plain hash never sets.
 const KEYED_HASH: u32 = 1 << 4;
@@ -117,26 +117,107 @@ struct Slots<V, const G: usize> {
     m3: Block<V, G>,
 }
 
+/// Where the low or the high half of a loaded 64-byte block goes.
+#[derive(Clone, Copy)]
+enum Slot {
+    H1,
+    M1Low,
+    M1High,
+    H2,
+    M2Low,
+    M2High,
+    Z7,
+    M3High,
+    /// Past the end of the record: dropped.
+    None,
+}
+
+/// One T8 call with the given role counter.
+///
+/// It runs the backend's out-of-line step.
+///
+/// A stage's three calls then share one copy of the kernel, which keeps the stage loop in the core's decoded-instruction cache.
+#[inline(always)]
+fn call<V: Backend<W>, const W: usize, const G: usize>(
+    h: &mut State<V, G>,
+    m: &Block<V, G>,
+    role: u64,
+) {
+    // SAFETY: the driver only reaches this backend on a CPU with its target features.
+    unsafe { V::t8_compress(h, m, role) };
+}
+
+/// The body of the out-of-line step: one compression in the given role.
+#[inline(always)]
+pub(super) fn compress_role<V: Word, const G: usize>(
+    h: &mut State<V, G>,
+    m: &Block<V, G>,
+    role: u64,
+) {
+    compress(h, m, role, BLOCK_LEN, FLAGS);
+}
+
 impl<V: Word, const G: usize> Slots<V, G> {
-    /// Write the 32-byte block of index `index` in the record, for group `g`, into its slot.
+    /// Load the aligned 64-byte block at `offset` of every lane, and write its two halves into their slots.
     ///
-    /// Index 0 is `z_1`; after it, the blocks run `z_2 .. z_8` once per stage.
+    /// The slots are constants at every call site, so each write compiles to plain stores.
     #[inline(always)]
-    fn put(&mut self, index: usize, g: usize, half: &[V]) {
-        let dst: &mut [V] = if index == 0 {
-            &mut self.h1[g]
-        } else {
-            match (index - 1) % 7 {
-                0 => &mut self.m1[g][..STATE_WORDS],
-                1 => &mut self.m1[g][STATE_WORDS..],
-                2 => &mut self.h2[g],
-                3 => &mut self.m2[g][..STATE_WORDS],
-                4 => &mut self.m2[g][STATE_WORDS..],
-                5 => &mut self.z7[g],
-                _ => &mut self.m3[g][STATE_WORDS..],
-            }
+    fn load<const W: usize>(
+        &mut self,
+        lanes: &Lanes<'_, W, G>,
+        offset: usize,
+        low: Slot,
+        high: Slot,
+    ) where
+        V: Backend<W>,
+    {
+        let q = lanes.load::<V>(offset);
+        for (g, q) in q.iter().enumerate() {
+            let (lo, hi) = q.split_at(STATE_WORDS);
+            self.put(low, g, lo);
+            self.put(high, g, hi);
+        }
+    }
+
+    /// Write eight words of group `g` into a slot.
+    #[inline(always)]
+    fn put(&mut self, slot: Slot, g: usize, half: &[V]) {
+        let dst: &mut [V] = match slot {
+            Slot::H1 => &mut self.h1[g],
+            Slot::M1Low => &mut self.m1[g][..STATE_WORDS],
+            Slot::M1High => &mut self.m1[g][STATE_WORDS..],
+            Slot::H2 => &mut self.h2[g],
+            Slot::M2Low => &mut self.m2[g][..STATE_WORDS],
+            Slot::M2High => &mut self.m2[g][STATE_WORDS..],
+            Slot::Z7 => &mut self.z7[g],
+            Slot::M3High => &mut self.m3[g][STATE_WORDS..],
+            Slot::None => return,
         };
         dst.copy_from_slice(half);
+    }
+
+    /// The last call of a stage, then its output into `h1` as the next stage's `z_1`.
+    ///
+    /// ```text
+    ///     h3 = a ^ z_7,   m3 = (b ^ z_7) || z_8,   s = h_3(h3; m3) ^ z_7
+    /// ```
+    #[inline(always)]
+    fn finish<const W: usize>(&mut self)
+    where
+        V: Backend<W>,
+    {
+        for g in 0..G {
+            for i in 0..STATE_WORDS {
+                self.h3[g][i] = self.h1[g][i].xor(self.z7[g][i]);
+                self.m3[g][i] = self.h2[g][i].xor(self.z7[g][i]);
+            }
+        }
+        call(&mut self.h3, &self.m3, ROLES[2]);
+        for g in 0..G {
+            for i in 0..STATE_WORDS {
+                self.h1[g][i] = self.h3[g][i].xor(self.z7[g][i]);
+            }
+        }
     }
 }
 
@@ -152,9 +233,14 @@ impl<V: Word, const G: usize> Slots<V, G> {
 ///
 /// The record is read one aligned 64-byte block at a time, each transposed once, like a plain hash.
 ///
-/// A block is read just before the call that needs it.
+/// A stage's seven blocks start on alternate halves of a 64-byte block, so stages come in two shapes:
 ///
-/// So the block that opens the next stage lands in the first call's slot only once that call is done.
+/// ```text
+///     even stage, z_2 already loaded:    [z_3 z_4] [z_5 z_6] [z_7 z_8]                3 loads
+///     odd stage:                         [z_2 z_3] [z_4 z_5] [z_6 z_7] [z_8 z_2']     4 loads
+/// ```
+///
+/// `z_2'` opens the next stage, and lands in the first call's slot only after that call is done.
 #[inline(always)]
 pub(super) fn group<V: Backend<W>, const W: usize, const G: usize>(
     lanes: &Lanes<'_, W, G>,
@@ -162,70 +248,48 @@ pub(super) fn group<V: Backend<W>, const W: usize, const G: usize>(
     out: &mut [[[u8; OUT_LEN]; W]; G],
 ) {
     let zero = [[V::splat(0); STATE_WORDS]; G];
+    let wide = [[V::splat(0); 2 * STATE_WORDS]; G];
     let mut slots = Slots {
         h1: zero,
-        m1: [[V::splat(0); 2 * STATE_WORDS]; G],
+        m1: wide,
         h2: zero,
-        m2: [[V::splat(0); 2 * STATE_WORDS]; G],
+        m2: wide,
         z7: zero,
         h3: zero,
-        m3: [[V::splat(0); 2 * STATE_WORDS]; G],
+        m3: wide,
     };
+    let len = BLOCK_BYTES + STAGE_STRIDE * stages;
+    let at = |block: usize| block * BLOCK_BYTES;
 
-    // The record has 7 k + 1 blocks of 32 bytes; `loaded` of them sit in their slots.
-    let blocks = 1 + 7 * stages;
-    let len = BLOCK_BYTES * blocks;
-    let mut loaded = 0;
-    let mut fill = |slots: &mut Slots<V, G>, until: usize| {
-        while loaded < until {
-            // Two blocks per aligned 64-byte load.
-            //
-            // An odd count ends with one block: the high half of the load that ends the record.
-            if loaded + 1 < blocks {
-                let q = lanes.load::<V>(loaded * BLOCK_BYTES);
-                for (g, q) in q.iter().enumerate() {
-                    slots.put(loaded, g, &q[..STATE_WORDS]);
-                    slots.put(loaded + 1, g, &q[STATE_WORDS..]);
-                }
-                loaded += 2;
-            } else {
-                let q = lanes.load::<V>(len - 2 * BLOCK_BYTES);
-                for (g, q) in q.iter().enumerate() {
-                    slots.put(loaded, g, &q[STATE_WORDS..]);
-                }
-                loaded += 1;
-            }
-        }
-    };
+    // The first 64 bytes: z_1 and the first stage's z_2.
+    slots.load(lanes, 0, Slot::H1, Slot::M1Low);
 
     for stage in 0..stages {
-        // Index of this stage's z_2 in the record.
+        // Index of this stage's z_2 among the record's 32-byte blocks.
         let first = 1 + 7 * stage;
 
-        // a = h_1(z_1; z_2 z_3), left in the slot of z_1.
-        fill(&mut slots, first + 2);
-        compress(&mut slots.h1, &slots.m1, ROLES[0], BLOCK_LEN, FLAGS);
+        if stage % 2 == 0 {
+            // z_2 sits in the high half of the previous load.
+            slots.load(lanes, at(first + 1), Slot::M1High, Slot::H2);
+            call(&mut slots.h1, &slots.m1, ROLES[0]);
+            slots.load(lanes, at(first + 3), Slot::M2Low, Slot::M2High);
+            call(&mut slots.h2, &slots.m2, ROLES[1]);
+            slots.load(lanes, at(first + 5), Slot::Z7, Slot::M3High);
+        } else {
+            slots.load(lanes, at(first), Slot::M1Low, Slot::M1High);
+            call(&mut slots.h1, &slots.m1, ROLES[0]);
+            slots.load(lanes, at(first + 2), Slot::H2, Slot::M2Low);
+            slots.load(lanes, at(first + 4), Slot::M2High, Slot::Z7);
+            call(&mut slots.h2, &slots.m2, ROLES[1]);
 
-        // b = h_2(z_4; z_5 z_6), left in the slot of z_4.
-        fill(&mut slots, first + 5);
-        compress(&mut slots.h2, &slots.m2, ROLES[1], BLOCK_LEN, FLAGS);
-
-        // The last call's inputs: chaining value a ^ z_7, block (b ^ z_7) || z_8.
-        fill(&mut slots, first + 7);
-        for g in 0..G {
-            for i in 0..STATE_WORDS {
-                slots.h3[g][i] = slots.h1[g][i].xor(slots.z7[g][i]);
-                slots.m3[g][i] = slots.h2[g][i].xor(slots.z7[g][i]);
+            // z_8, then the next stage's z_2; the last stage reads the block that ends the record.
+            if stage + 1 < stages {
+                slots.load(lanes, at(first + 6), Slot::M3High, Slot::M1Low);
+            } else {
+                slots.load(lanes, len - 2 * BLOCK_BYTES, Slot::None, Slot::M3High);
             }
         }
-        compress(&mut slots.h3, &slots.m3, ROLES[2], BLOCK_LEN, FLAGS);
-
-        // s = h_3(...) ^ z_7, which is also the next stage's z_1.
-        for g in 0..G {
-            for i in 0..STATE_WORDS {
-                slots.h1[g][i] = slots.h3[g][i].xor(slots.z7[g][i]);
-            }
-        }
+        slots.finish::<W>();
     }
 
     for (s, out) in slots.h1.iter().zip(out) {
