@@ -275,7 +275,12 @@ def main(results: Path) -> None:
     print("- Keccak-256 absorbs 136 bytes per permutation, so T8 costs more calls than the plain hash and is not measured.")
     print("- The build targets the host CPU, so all three hashes batch on AVX-512.")
     print("- Both leaves share the transpose of every record into vector lanes, which the call count does not see.")
-    print("- A tree that streams from DRAM on every thread is bound by memory, not by calls.")
+    print("- Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.")
+    print("- So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.")
+    print("- On one thread, commitment follows the call ratio.")
+    print("- On 32 threads it does not: every thread waits on memory, so fewer calls barely shows.")
+    print("- On this Plonky3 commit the tree still copies each row before hashing it, which doubles that memory traffic.")
+    print("- A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.")
 
 
 if __name__ == "__main__":

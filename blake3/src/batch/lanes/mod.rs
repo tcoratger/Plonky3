@@ -90,6 +90,16 @@ macro_rules! out_of_line_steps {
 
         #[inline(never)]
         $(#[target_feature(enable = $feature)])?
+        unsafe fn t8_compress<const G: usize>(
+            h: &mut $crate::batch::State<Self, G>,
+            m: &$crate::batch::Block<Self, G>,
+            counter: u64,
+        ) {
+            $crate::batch::t8::compress_role::<Self, G>(h, m, counter)
+        }
+
+        #[inline(never)]
+        $(#[target_feature(enable = $feature)])?
         unsafe fn parent<const G: usize>(
             mode: $crate::batch::Mode,
             left: &$crate::batch::State<Self, G>,
@@ -150,7 +160,7 @@ use core::fmt;
 use blake3::{BLOCK_LEN, OUT_LEN};
 
 use super::compress::{BLOCK_WORDS, STATE_WORDS};
-use super::{Lanes, Mode, State};
+use super::{Block, Lanes, Mode, State};
 
 /// Every backend this build compiles, widest first.
 ///
@@ -462,6 +472,13 @@ pub(super) trait Backend<const W: usize>: Word {
         stages: usize,
         out: &mut [[[u8; OUT_LEN]; W]; G],
     );
+
+    /// One T8 call on every lane, kept out of line so a stage's three calls share one copy of the kernel.
+    ///
+    /// # Safety
+    ///
+    /// The running CPU has this backend's target features.
+    unsafe fn t8_compress<const G: usize>(h: &mut State<Self, G>, m: &Block<Self, G>, counter: u64);
 }
 
 /// Every lane of one vector, in lane order.
