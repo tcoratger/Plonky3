@@ -294,6 +294,7 @@ def main(results: Path, platform: str) -> None:
     print(f"RAYON_NUM_THREADS={PLATFORM['threads']} {BENCH} --bench t8_commit")
     print("```\n")
     print("- Every command in this report assumes `RUSTFLAGS=-Ctarget-cpu=native`, as exported above.")
+    print("- On AArch64, add `p3-blake3/neon` to `--features`, so one standard BLAKE3 message runs NEON code, not portable code.")
     print("- A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.")
     print(f"- {PLATFORM['pin_note']}")
     print("- `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.")
