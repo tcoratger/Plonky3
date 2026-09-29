@@ -17,13 +17,16 @@ use p3_commit::{BatchOpening, Mmcs};
 use p3_matrix::Dimensions;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_sha256::{Sha256, Sha256Compress, T8Sha256};
+use p3_sha256::{Sha256, Sha256Compress, T8Sha256, T253Sha256};
 use p3_symmetric::{CompressionFunctionFromHasher, CryptographicHasher, PseudoCompressionFunction};
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
 /// Tree shapes as (record bytes, log2 records).
 const SHAPES: [(usize, u32); 3] = [(256, 10), (256, 20), (65_664, 10)];
+
+/// The same shapes for T253, whose records are `32 + 221 k` bytes.
+const T253_SHAPES: [(usize, u32); 3] = [(253, 10), (253, 20), (65_448, 10)];
 
 /// Openings verified per iteration.
 const OPENINGS: usize = 64;
@@ -81,13 +84,19 @@ where
 }
 
 /// Time one family's openings with standard and with T8 leaves, over the same node hash.
-fn family<S, T, C>(c: &mut Criterion, name: &str, standard: &S, t8: &T, node: &C)
-where
+fn family<S, T, C>(
+    c: &mut Criterion,
+    name: &str,
+    standard: &S,
+    t8: &T,
+    node: &C,
+    shapes: &[(usize, u32)],
+) where
     S: CryptographicHasher<u8, [u8; 32]> + Sync,
     T: CryptographicHasher<u8, [u8; 32]> + Sync,
     C: PseudoCompressionFunction<[u8; 32], 2> + Sync + Clone,
 {
-    for (len, log) in SHAPES {
+    for &(len, log) in shapes {
         let rows = 1usize << log;
         let mut rng = SmallRng::seed_from_u64(u64::from(log) ^ len as u64);
         let records = RowMajorMatrix::new((0..rows * len).map(|_| rng.random()).collect(), len);
@@ -125,6 +134,7 @@ fn bench_verify(c: &mut Criterion) {
         &Blake3,
         &T8Blake3,
         &CompressionFunctionFromHasher::<_, 2, 32>::new(Blake3),
+        &SHAPES,
     );
     family(
         c,
@@ -132,8 +142,17 @@ fn bench_verify(c: &mut Criterion) {
         &Blake2s256,
         &T8Blake2s,
         &CompressionFunctionFromHasher::<_, 2, 32>::new(Blake2s256),
+        &SHAPES,
     );
-    family(c, "sha256", &Sha256, &T8Sha256, &Sha256Compress);
+    family(c, "sha256", &Sha256, &T8Sha256, &Sha256Compress, &SHAPES);
+    family(
+        c,
+        "sha256-t253",
+        &Sha256,
+        &T253Sha256,
+        &Sha256Compress,
+        &T253_SHAPES,
+    );
 }
 
 criterion_group!(benches, bench_verify);

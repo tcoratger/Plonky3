@@ -52,8 +52,9 @@ PLATFORMS = {
 # The host this report is written for, set by `main`.
 PLATFORM = PLATFORMS["x86-avx512"]
 
-HASHES = {"blake3": "BLAKE3", "blake2s": "BLAKE2s", "sha256": "SHA-256", "keccak": "Keccak-256"}
+HASHES = {"blake3": "BLAKE3", "blake2s": "BLAKE2s", "sha256": "SHA-256", "sha256-t253": "SHA-256, T253", "keccak": "Keccak-256"}
 RECORDS = [256, 480, 65_664]
+T253_RECORDS = [253, 474, 65_448]
 
 
 def standard_leaf(hash_name: str, length: int) -> int:
@@ -64,21 +65,25 @@ def standard_leaf(hash_name: str, length: int) -> int:
     if hash_name == "blake2s":
         # One compression per 64-byte block, the last one flagged final.
         return max(1, math.ceil(length / 64))
-    if hash_name == "sha256":
+    if hash_name in ("sha256", "sha256-t253"):
         # One compression per 64-byte block, after at least 9 bytes of padding.
         return math.ceil((length + 9) / 64)
     # One permutation per 136-byte block, after at least one byte of padding.
     return length // 136 + 1
 
 
-def t8_leaf(length: int) -> int:
-    """Native calls of T8 on one record: three per stage of 224 fresh bytes."""
-    return 3 * ((length - 32) // 224)
+def t8_leaf(length: int, hash_name: str = "") -> int:
+    """Native calls of the T8 leaf on one record: three per stage.
+
+    A T8 stage adds 224 fresh bytes, a T253 stage 221.
+    """
+    stride = 221 if hash_name == "sha256-t253" else 224
+    return 3 * ((length - 32) // stride)
 
 
 def tree_calls(hash_name: str, length: int, log: int, kind: str) -> tuple[int, int]:
     """Native calls of (standard, T8) to commit a tree of 2^log records, or to verify one opening."""
-    s, t = standard_leaf(hash_name, length), t8_leaf(length)
+    s, t = standard_leaf(hash_name, length), t8_leaf(length, hash_name)
     if kind == "commit":
         n = 1 << log
         return n * s + n - 1, n * t + n - 1
@@ -128,8 +133,8 @@ def calls_table() -> str:
         "|---|---:|---:|---:|---:|",
     ]
     for key, name in HASHES.items():
-        for length in RECORDS:
-            s, t = standard_leaf(key, length), t8_leaf(length)
+        for length in (T253_RECORDS if key == "sha256-t253" else RECORDS):
+            s, t = standard_leaf(key, length), t8_leaf(length, key)
             change = f"{100 * (1 - t / s):.1f}% fewer" if t <= s else f"{100 * (t / s - 1):.1f}% more"
             rows.append(f"| {name} | {length:,} B | {s:,} | {t:,} | {change} |")
     return "\n".join(rows)
@@ -200,7 +205,7 @@ def measured(data: dict, build: str) -> str:
             log = int(value.split("^")[1])
             bytes_ = length << log
             s, t = per["standard"], per["t8"]
-            ratio = standard_leaf(key, length) / t8_leaf(length)
+            ratio = standard_leaf(key, length) / t8_leaf(length, key)
             rows.append(
                 f"| {HASHES[key]} | {length:,} B | 2^{log} | {cell(s)} | {cell(t)} |"
                 f" {bytes_ / s[0]:.2f} | {bytes_ / t[0]:.2f} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |"
@@ -218,7 +223,7 @@ def measured(data: dict, build: str) -> str:
                 continue
             length = int(value[:-1])
             s, t = per["standard"], per["t8"]
-            ratio = standard_leaf(key, length) / t8_leaf(length)
+            ratio = standard_leaf(key, length) / t8_leaf(length, key)
             rows.append(f"| {HASHES[key]} | {length:,} B | {cell(s)} | {cell(t)} | **{s[0] / t[0]:.3f}x** | {ratio:.3f}x |")
     out.append("### Leaf hashing, one record, one core\n\n" + leaf_single() + "\n" + "\n".join(rows))
 
@@ -324,7 +329,10 @@ def main(results: Path, platform: str) -> None:
     print("## Notes\n")
     print("- BLAKE3 keeps T8's three roles apart with its counter and flags: the construction as analysed.")
     print("- BLAKE2s keeps them apart with counters 1, 2 and 3 and the final flag clear, which no plain BLAKE2s call uses.")
-    print("- SHA-256's compression takes exactly 96 bytes, so its three calls are one function. The security analysis does not cover that instantiation.")
+    print("- SHA-256's compression takes exactly 96 bytes, so T8's three calls there are one function. The security analysis does not cover that instantiation.")
+    print("- T253 is T8 on SHA-256 with a role byte at the top of each call's chaining value, so its three calls are distinct functions.")
+    print("- The tree's node hash starts from the SHA-256 initial value, whose top byte is 0x6a, so no role meets it either.")
+    print("- The price is one byte per tagged block: records of 32 + 221 k bytes, compared with plain SHA-256 on the same bytes.")
     print("- Keccak-256 absorbs 136 bytes per permutation, so T8 costs more calls than the plain hash and is not measured.")
     for line in PLATFORM["notes"]:
         print(f"- {line}")

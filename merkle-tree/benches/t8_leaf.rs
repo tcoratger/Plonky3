@@ -11,14 +11,20 @@ use core::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use p3_blake2s::{Blake2s256, T8Blake2s};
 use p3_blake3::{Blake3, T8Blake3};
-use p3_sha256::{Sha256, T8Sha256};
+use p3_sha256::{Sha256, T8Sha256, T253Sha256};
 use p3_symmetric::CryptographicHasher;
 
-/// Batches as (record bytes, log2 records), each 16 MiB: past the private caches, inside L3.
+/// Batches as (record bytes, log2 records), each about 16 MiB: past the private caches, inside L3.
 const BATCHES: [(usize, u32); 3] = [(256, 16), (480, 15), (65_664, 8)];
 
 /// Single records: eight blocks, fifteen blocks, and the 64 KiB class.
 const SINGLES: [usize; 3] = [256, 480, 65_664];
+
+/// The same classes for T253, whose records are `32 + 221 k` bytes: one, two and 296 stages.
+const T253_BATCHES: [(usize, u32); 3] = [(253, 16), (474, 15), (65_448, 8)];
+
+/// Single T253 records of one, two and 296 stages.
+const T253_SINGLES: [usize; 3] = [253, 474, 65_448];
 
 /// Deterministic bytes, generated once outside timing.
 fn input(len: usize) -> Vec<u8> {
@@ -34,12 +40,17 @@ fn input(len: usize) -> Vec<u8> {
 }
 
 /// Time one family's standard and T8 leaves, batched and one record at a time.
-fn family<S, T>(c: &mut Criterion, name: &str, standard: &S, t8: &T)
-where
+fn family<S, T>(
+    c: &mut Criterion,
+    name: &str,
+    standard: &S,
+    t8: &T,
+    (batches, singles): (&[(usize, u32)], &[usize]),
+) where
     S: CryptographicHasher<u8, [u8; 32]>,
     T: CryptographicHasher<u8, [u8; 32]>,
 {
-    for (len, log) in BATCHES {
+    for &(len, log) in batches {
         let bytes = input(len << log);
         let mut out = vec![[0u8; 32]; 1 << log];
         let mut group = c.benchmark_group(format!("leaf/{name}/batch/{len}B"));
@@ -60,7 +71,7 @@ where
     let mut group = c.benchmark_group(format!("leaf/{name}/single"));
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(2));
-    for len in SINGLES {
+    for &len in singles {
         let record = input(len);
         group.throughput(Throughput::Bytes(len as u64));
         let id = format!("{len}B");
@@ -75,9 +86,17 @@ where
 }
 
 fn bench_leaf(c: &mut Criterion) {
-    family(c, "blake3", &Blake3, &T8Blake3);
-    family(c, "blake2s", &Blake2s256, &T8Blake2s);
-    family(c, "sha256", &Sha256, &T8Sha256);
+    let t8 = (&BATCHES[..], &SINGLES[..]);
+    family(c, "blake3", &Blake3, &T8Blake3, t8);
+    family(c, "blake2s", &Blake2s256, &T8Blake2s, t8);
+    family(c, "sha256", &Sha256, &T8Sha256, t8);
+    family(
+        c,
+        "sha256-t253",
+        &Sha256,
+        &T253Sha256,
+        (&T253_BATCHES, &T253_SINGLES),
+    );
 }
 
 criterion_group!(benches, bench_leaf);

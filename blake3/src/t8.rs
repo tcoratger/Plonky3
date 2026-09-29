@@ -4,6 +4,8 @@
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+mod x86_64_avx2;
 
 use blake3::OUT_LEN;
 use blake3::platform::Platform;
@@ -166,11 +168,8 @@ fn stage(platform: Platform, z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
     let word_block =
         |at: usize| -> Words { words(fresh[at..][..BLOCK_BYTES].try_into().expect("in range")) };
 
-    // The two independent calls.
-    let mut a = z1;
-    platform.compress_in_place(&mut a, block(0), block_len, ROLES[0], flags);
-    let mut b = word_block(64);
-    platform.compress_in_place(&mut b, block(96), block_len, ROLES[1], flags);
+    // The two independent calls: side by side in one AVX2 pass when the CPU has it.
+    let (a, b) = pair(platform, z1, block(0), word_block(64), block(96));
 
     // The last call: chaining value a ^ z_7, block (b ^ z_7) || z_8.
     let z7 = word_block(160);
@@ -181,6 +180,33 @@ fn stage(platform: Platform, z1: Words, fresh: &[u8; STAGE_STRIDE]) -> Words {
     platform.compress_in_place(&mut c, &last, block_len, ROLES[2], flags);
 
     core::array::from_fn(|i| c[i] ^ z7[i])
+}
+
+/// The two independent calls of a stage: `a = h_1(z_1; m_1)` and `b = h_2(z_4; m_2)`.
+///
+/// On x86-64 with AVX2 they run as one two-message pass, and cost about one call.
+#[inline]
+fn pair(platform: Platform, z1: Words, m1: &[u8; 64], z4: Words, m2: &[u8; 64]) -> (Words, Words) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    if x86_64_avx2::supported() {
+        let call = |cv, block, counter| x86_64_avx2::Call {
+            cv,
+            block,
+            counter,
+            flags: FLAGS,
+        };
+        // SAFETY: the CPU check above found AVX2.
+        return unsafe {
+            x86_64_avx2::compress_pair(&call(z1, m1, ROLES[0]), &call(z4, m2, ROLES[1]))
+        };
+    }
+
+    // One call after the other, through the `blake3` crate's one-block compression.
+    let (flags, block_len) = (FLAGS as u8, 2 * BLOCK_BYTES as u8);
+    let (mut a, mut b) = (z1, z4);
+    platform.compress_in_place(&mut a, m1, block_len, ROLES[0], flags);
+    platform.compress_in_place(&mut b, m2, block_len, ROLES[1], flags);
+    (a, b)
 }
 
 /// Read 32 bytes as eight little-endian words.
