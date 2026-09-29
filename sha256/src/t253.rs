@@ -29,6 +29,11 @@ pub const STAGE_STRIDE: usize = 3 * TAGGED_BYTES + BLOCK_BYTES + 2 * BLOCK_BYTES
 /// So no role meets it, and the three roles are three distinct functions.
 pub(crate) const ROLES: [u8; 3] = [0x01, 0x02, 0x03];
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 /// Eight big-endian words: a chaining value, a digest, or a 32-byte block.
 type Words = [u32; 8];
 
@@ -74,6 +79,12 @@ impl CryptographicHasher<u8, [u8; 32]> for T253Sha256 {
         target_feature = "avx512bw"
     ))]
     const LANES: usize = crate::x86_64_avx512::LANES;
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_feature = "neon",
+        target_feature = "sha2"
+    ))]
+    const LANES: usize = crate::four_lane::LANES;
 
     fn hash_iter<I>(&self, input: I) -> [u8; 32]
     where
@@ -109,16 +120,33 @@ impl CryptographicHasher<u8, [u8; 32]> for T253Sha256 {
     fn hash_slice(&self, input: &[u8]) -> [u8; 32] {
         stages(input.len()).expect("a T253 record is 32 + 221 k bytes for some k >= 1");
 
-        // The record opens with s_0, then one stage per 221 bytes.
-        let (head, mut rest) = input
-            .split_first_chunk::<BLOCK_BYTES>()
-            .expect("checked length");
-        let mut s = *head;
-        while let Some((fresh, tail)) = rest.split_first_chunk::<STAGE_STRIDE>() {
-            s = stage(&s, fresh);
-            rest = tail;
+        // With the ARM SHA-2 extension, the chained value stays in registers between stages.
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_feature = "sha2"
+        ))]
+        {
+            crate::aarch64_sha2::t253::hash_one(input)
         }
-        s
+
+        // The record opens with s_0, then one stage per 221 bytes.
+        #[cfg(not(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_feature = "sha2"
+        )))]
+        {
+            let (head, mut rest) = input
+                .split_first_chunk::<BLOCK_BYTES>()
+                .expect("checked length");
+            let mut s = *head;
+            while let Some((fresh, tail)) = rest.split_first_chunk::<STAGE_STRIDE>() {
+                s = stage(&s, fresh);
+                rest = tail;
+            }
+            s
+        }
     }
 
     /// Hash equal-length records laid end to end.
@@ -144,17 +172,30 @@ impl CryptographicHasher<u8, [u8; 32]> for T253Sha256 {
         let len = input.len() / out.len();
         let stages = stages(len).expect("a T253 record is 32 + 221 k bytes for some k >= 1");
 
-        // The AVX-512 kernel when the build has it, one record at a time otherwise.
+        // The AVX-512 or the ARM SHA-2 kernel when the build has one, one record at a time otherwise.
         #[cfg(all(
             target_arch = "x86_64",
             target_feature = "avx512f",
             target_feature = "avx512bw"
         ))]
         crate::x86_64_avx512::t253::hash_many(input, len, stages, out);
-        #[cfg(not(all(
-            target_arch = "x86_64",
-            target_feature = "avx512f",
-            target_feature = "avx512bw"
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_feature = "neon",
+            target_feature = "sha2"
+        ))]
+        crate::aarch64_sha2::t253::hash_many(input, len, stages, out);
+        #[cfg(not(any(
+            all(
+                target_arch = "x86_64",
+                target_feature = "avx512f",
+                target_feature = "avx512bw"
+            ),
+            all(
+                target_arch = "aarch64",
+                target_feature = "neon",
+                target_feature = "sha2"
+            )
         )))]
         {
             let _ = stages;
@@ -173,6 +214,24 @@ impl CryptographicHasher<u8, [u8; 32]> for T253Sha256 {
 ///     u_1   0..31     y_3  31..63     u_4  63..94
 ///     m_2  94..158    z_7 158..190    u_8 190..221
 /// ```
+///
+/// With the ARM SHA-2 extension, the two independent calls run side by side as two streams.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+))]
+#[inline]
+fn stage(s: &[u8; 32], fresh: &[u8; STAGE_STRIDE]) -> [u8; 32] {
+    crate::aarch64_sha2::t253::stage(s, fresh)
+}
+
+/// One stage through SHA-NI pairs or `sha2`, given the chained value `s` and the stage's 221 fresh bytes.
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 #[inline]
 fn stage(s: &[u8; 32], fresh: &[u8; STAGE_STRIDE]) -> [u8; 32] {
     let half = |start: usize| -> &[u8; 32] { fresh[start..][..32].try_into().expect("in range") };
@@ -205,6 +264,11 @@ fn stage(s: &[u8; 32], fresh: &[u8; STAGE_STRIDE]) -> [u8; 32] {
     bytes(&core::array::from_fn(|i| c[i] ^ z7[i]))
 }
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 /// The two independent calls of a stage, each block given as its two 32-byte halves.
 #[inline]
 fn pair(a: (&Words, [&[u8; 32]; 2]), b: (&Words, [&[u8; 32]; 2])) -> (Words, Words) {
@@ -224,6 +288,11 @@ fn pair(a: (&Words, [&[u8; 32]; 2]), b: (&Words, [&[u8; 32]; 2])) -> (Words, Wor
     (compress(*a.0, &join(a.1)), compress(*b.0, &join(b.1)))
 }
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 /// One SHA-256 compression without padding, through `sha2`.
 #[inline]
 fn compress(mut state: Words, block: &[u8; 64]) -> Words {
@@ -231,6 +300,11 @@ fn compress(mut state: Words, block: &[u8; 64]) -> Words {
     state
 }
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 /// Read 32 bytes as eight big-endian words, the order SHA-256 uses.
 #[inline(always)]
 fn words(block: &[u8; BLOCK_BYTES]) -> Words {
@@ -238,6 +312,11 @@ fn words(block: &[u8; BLOCK_BYTES]) -> Words {
     core::array::from_fn(|i| u32::from_be_bytes(chunks[i]))
 }
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_feature = "neon",
+    target_feature = "sha2"
+)))]
 /// Write eight words as 32 big-endian bytes.
 #[inline(always)]
 fn bytes(words: &Words) -> [u8; 32] {
