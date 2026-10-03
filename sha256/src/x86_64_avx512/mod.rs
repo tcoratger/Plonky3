@@ -7,6 +7,8 @@
 //! So every lane runs the same rounds, and a block of padding only is the same in every lane.
 
 mod rounds;
+pub(crate) mod t253;
+pub(crate) mod t8;
 
 use core::arch::x86_64::*;
 

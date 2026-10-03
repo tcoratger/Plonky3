@@ -10,6 +10,7 @@
 
 mod compress;
 mod lanes;
+pub(crate) mod t8;
 
 use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 

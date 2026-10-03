@@ -29,6 +29,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 p3-baby-bear = { path = "../baby-bear" }
+p3-blake2s = { path = "../blake2s" }
 p3-blake3 = { path = "../blake3" }
 p3-goldilocks = { path = "../goldilocks" }
 p3-keccak = { path = "../keccak" }
@@ -53,6 +54,22 @@ harness = false
 
 [[bench]]
 name = "wide_rows"
+harness = false
+
+[[bench]]
+name = "t8_leaf"
+harness = false
+
+[[bench]]
+name = "t8_commit"
+harness = false
+
+[[bench]]
+name = "t8_verify"
+harness = false
+
+[[bench]]
+name = "t8_arity"
 harness = false
 
 [lints]

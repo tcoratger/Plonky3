@@ -13,6 +13,9 @@ categories.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion.workspace = true
 
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+cpufeatures.workspace = true
+
 [features]
 default = []
 
