@@ -8,17 +8,25 @@ use p3_symmetric::CryptographicHasher;
 
 use super::rounds::compress_blocks;
 use super::{
-    BLOCK_BYTES, BLOCK_WORDS, Block, GROUPS, LANES, Lanes, ONE_AT_A_TIME_BELOW, STATE_WORDS, State,
+    BLOCK_BYTES, BLOCK_WORDS, Block, Digests, GROUPS, LANES, Lanes, STATE_WORDS, State, WIDTH,
     load_block, store_digests,
 };
 use crate::t8::{STAGE_STRIDE, T8Sha256};
+
+/// Small tails use paired SHA-NI calls when enabled, or scalar calls otherwise.
+const SERIAL_BELOW: usize = if cfg!(target_feature = "sha") {
+    WIDTH
+} else {
+    2
+};
 
 /// T8-hash equal-length records of `len` bytes laid end to end in `input`.
 ///
 /// The caller guarantees `input.len() == len * out.len()` and a T8 record length.
 pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8; 32]]) {
-    // Whole groups of 32 records.
-    let (groups, rest) = out.as_chunks_mut::<LANES>();
+    // Layout: 32 records -> two register groups of 16 lanes.
+    let (full, rest) = out.split_at_mut(out.len() / LANES * LANES);
+    let groups = full.as_chunks_mut::<WIDTH>().0.as_chunks_mut::<GROUPS>().0;
     for (index, digests) in groups.iter_mut().enumerate() {
         let lanes = Lanes {
             input,
@@ -29,9 +37,9 @@ pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8;
         group(&lanes, stages, digests);
     }
 
-    // The short final group, split as the plain hash splits it.
+    // Small tails use single-record calls; larger tails fill one vector pass.
     let first = groups.len() * LANES;
-    if rest.len() < ONE_AT_A_TIME_BELOW {
+    if rest.len() < SERIAL_BELOW {
         for (record, digest) in input[first * len..].chunks_exact(len).zip(&mut *rest) {
             *digest = T8Sha256.hash_slice(record);
         }
@@ -43,9 +51,9 @@ pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8;
             first,
             count: rest.len(),
         };
-        let mut digests = [[0u8; 32]; LANES];
+        let mut digests = [[[0u8; 32]; WIDTH]; GROUPS];
         group(&lanes, stages, &mut digests);
-        rest.copy_from_slice(&digests[..rest.len()]);
+        rest.copy_from_slice(&digests.as_flattened()[..rest.len()]);
     }
 }
 
@@ -59,19 +67,19 @@ pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8;
 /// ```
 struct Slots {
     /// Chaining value of the first call: `z_1`, then `a`, then the stage output `s`.
-    h1: State,
+    h1: State<GROUPS>,
     /// Block of the first call: `z_2 || z_3`.
-    m1: Block,
+    m1: Block<GROUPS>,
     /// Chaining value of the second call: `z_4`, then `b`.
-    h2: State,
+    h2: State<GROUPS>,
     /// Block of the second call: `z_5 || z_6`.
-    m2: Block,
+    m2: Block<GROUPS>,
     /// The block `z_7`, kept for both XORs of the last call.
-    z7: State,
+    z7: State<GROUPS>,
     /// Chaining value of the last call: `a ^ z_7`.
-    h3: State,
+    h3: State<GROUPS>,
     /// Block of the last call: `(b ^ z_7) || z_8`.
-    m3: Block,
+    m3: Block<GROUPS>,
 }
 
 /// Where the low or the high half of a loaded 64-byte block goes.
@@ -93,7 +101,8 @@ impl Slots {
     /// Load the aligned 64-byte block at `offset` of every lane, and write its two halves into their slots.
     #[inline(always)]
     fn load(&mut self, lanes: &Lanes<'_>, offset: usize, low: Slot, high: Slot) {
-        let q = load_block(&lanes.rows(offset));
+        // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+        let q = unsafe { load_block(&lanes.rows::<GROUPS>(offset)) };
         for (g, q) in q.iter().enumerate() {
             let (lo, hi) = q.split_at(STATE_WORDS);
             self.put(low, g, lo);
@@ -142,8 +151,9 @@ impl Slots {
 ///
 /// A stage's three calls then share one copy of the kernel, which keeps the stage loop in the core's decoded-instruction cache.
 #[inline(never)]
-fn call(h: &mut State, m: &Block) {
-    compress_blocks(h, m);
+fn call(h: &mut State<GROUPS>, m: &Block<GROUPS>) {
+    // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+    unsafe { compress_blocks(h, m) };
 }
 
 /// T8-hash the record of every lane, stage by stage.
@@ -164,7 +174,7 @@ fn call(h: &mut State, m: &Block) {
 /// ```
 ///
 /// `z_2'` opens the next stage, and lands in the first call's slot only after that call is done.
-fn group(lanes: &Lanes<'_>, stages: usize, out: &mut [[u8; 32]; LANES]) {
+fn group(lanes: &Lanes<'_>, stages: usize, out: &mut Digests<GROUPS>) {
     // SAFETY: this module only compiles when the target enables AVX-512F.
     let zero = unsafe { _mm512_setzero_si512() };
     let mut slots = Slots {
@@ -210,5 +220,7 @@ fn group(lanes: &Lanes<'_>, stages: usize, out: &mut [[u8; 32]; LANES]) {
         slots.finish();
     }
 
-    store_digests(&slots.h1, out);
+    // Layout: 32 digests -> two groups of 16 lanes.
+    // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+    unsafe { store_digests(&slots.h1, out) };
 }

@@ -6,17 +6,25 @@ use p3_symmetric::CryptographicHasher;
 
 use super::rounds::compress_blocks;
 use super::{
-    BLOCK_WORDS, Block, LANES, Lanes, ONE_AT_A_TIME_BELOW, STATE_WORDS, State, load_block,
+    BLOCK_WORDS, Block, Digests, GROUPS, LANES, Lanes, STATE_WORDS, State, WIDTH, load_block,
     store_digests,
 };
 use crate::t253::{ROLES, STAGE_STRIDE, T253Sha256};
+
+/// Small tails use paired SHA-NI calls when enabled, or scalar calls otherwise.
+const SERIAL_BELOW: usize = if cfg!(target_feature = "sha") {
+    WIDTH
+} else {
+    2
+};
 
 /// T253-hash equal-length records of `len` bytes laid end to end in `input`.
 ///
 /// The caller guarantees `input.len() == len * out.len()` and a T253 record length.
 pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8; 32]]) {
-    // Whole groups of 32 records.
-    let (groups, rest) = out.as_chunks_mut::<LANES>();
+    // Layout: 32 records -> two register groups of 16 lanes.
+    let (full, rest) = out.split_at_mut(out.len() / LANES * LANES);
+    let groups = full.as_chunks_mut::<WIDTH>().0.as_chunks_mut::<GROUPS>().0;
     for (index, digests) in groups.iter_mut().enumerate() {
         let lanes = Lanes {
             input,
@@ -27,9 +35,9 @@ pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8;
         group(&lanes, stages, digests);
     }
 
-    // The short final group, split as the plain hash splits it.
+    // Small tails use single-record calls; larger tails fill one vector pass.
     let first = groups.len() * LANES;
-    if rest.len() < ONE_AT_A_TIME_BELOW {
+    if rest.len() < SERIAL_BELOW {
         for (record, digest) in input[first * len..].chunks_exact(len).zip(&mut *rest) {
             *digest = T253Sha256.hash_slice(record);
         }
@@ -41,16 +49,17 @@ pub(crate) fn hash_many(input: &[u8], len: usize, stages: usize, out: &mut [[u8;
             first,
             count: rest.len(),
         };
-        let mut digests = [[0u8; 32]; LANES];
+        let mut digests = [[[0u8; 32]; WIDTH]; GROUPS];
         group(&lanes, stages, &mut digests);
-        rest.copy_from_slice(&digests[..rest.len()]);
+        rest.copy_from_slice(&digests.as_flattened()[..rest.len()]);
     }
 }
 
 /// One call, out of line, so a stage's three calls share one copy of the kernel.
 #[inline(never)]
-fn call(h: &mut State, m: &Block) {
-    compress_blocks(h, m);
+fn call(h: &mut State<GROUPS>, m: &Block<GROUPS>) {
+    // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+    unsafe { compress_blocks(h, m) };
 }
 
 /// T253-hash the record of every lane, stage by stage.
@@ -69,7 +78,7 @@ fn call(h: &mut State, m: &Block) {
 /// That byte is replaced by the call's role tag.
 ///
 /// The last stage reads its final row 32 bytes earlier, ending exactly at the record's end.
-fn group(lanes: &Lanes<'_>, stages: usize, out: &mut [[u8; 32]; LANES]) {
+fn group(lanes: &Lanes<'_>, stages: usize, out: &mut Digests<GROUPS>) {
     // SAFETY (every intrinsic below): this module only compiles when the target enables AVX-512F.
     let splat = |w: u32| unsafe { _mm512_set1_epi32(w as i32) };
     let xor = |x: __m512i, y: __m512i| unsafe { _mm512_xor_si512(x, y) };
@@ -99,36 +108,37 @@ fn group(lanes: &Lanes<'_>, stages: usize, out: &mut [[u8; 32]; LANES]) {
             }
         })
     };
-    let row = |offset: usize| load_block(&lanes.rows(offset));
+    // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+    let row = |offset: usize| unsafe { load_block(&lanes.rows::<GROUPS>(offset)) };
 
     // s_0: the record's first 32 bytes.
     let first = row(0);
-    let mut s: State = core::array::from_fn(|g| low(&first[g]));
+    let mut s: State<GROUPS> = core::array::from_fn(|g| low(&first[g]));
 
     for stage in 0..stages {
         let o = crate::t253::BLOCK_BYTES + STAGE_STRIDE * stage;
         let (r1, r2, r3) = (row(o - 1), row(o + 62), row(o + 126));
 
         // a = h(0x01 || u_1; s || y_3).
-        let mut a: State = core::array::from_fn(|g| tag(low(&r1[g]), ROLES[0]));
-        let m1: Block = core::array::from_fn(|g| join(&s[g], &high(&r1[g])));
+        let mut a: State<GROUPS> = core::array::from_fn(|g| tag(low(&r1[g]), ROLES[0]));
+        let m1: Block<GROUPS> = core::array::from_fn(|g| join(&s[g], &high(&r1[g])));
         call(&mut a, &m1);
 
         // b = h(0x02 || u_4; m_2).
-        let mut b: State = core::array::from_fn(|g| tag(low(&r2[g]), ROLES[1]));
-        let m2: Block = core::array::from_fn(|g| join(&high(&r2[g]), &low(&r3[g])));
+        let mut b: State<GROUPS> = core::array::from_fn(|g| tag(low(&r2[g]), ROLES[1]));
+        let m2: Block<GROUPS> = core::array::from_fn(|g| join(&high(&r2[g]), &low(&r3[g])));
         call(&mut b, &m2);
 
         // s' = h(0x03 || u_8; (a ^ z_7) || (b ^ z_7)) ^ z_7.
-        let z7: State = core::array::from_fn(|g| high(&r3[g]));
-        let mut c: State = if stage + 1 < stages {
+        let z7: State<GROUPS> = core::array::from_fn(|g| high(&r3[g]));
+        let mut c: State<GROUPS> = if stage + 1 < stages {
             let r4 = row(o + 189);
             core::array::from_fn(|g| tag(low(&r4[g]), ROLES[2]))
         } else {
             let r4 = row(o + 157);
             core::array::from_fn(|g| tag(high(&r4[g]), ROLES[2]))
         };
-        let m3: Block = core::array::from_fn(|g| {
+        let m3: Block<GROUPS> = core::array::from_fn(|g| {
             join(
                 &core::array::from_fn(|i| xor(a[g][i], z7[g][i])),
                 &core::array::from_fn(|i| xor(b[g][i], z7[g][i])),
@@ -138,5 +148,7 @@ fn group(lanes: &Lanes<'_>, stages: usize, out: &mut [[u8; 32]; LANES]) {
         s = core::array::from_fn(|g| core::array::from_fn(|i| xor(c[g][i], z7[g][i])));
     }
 
-    store_digests(&s, out);
+    // Layout: 32 digests -> two groups of 16 lanes.
+    // SAFETY: this module requires AVX-512F and AVX-512BW in the build.
+    unsafe { store_digests(&s, out) };
 }

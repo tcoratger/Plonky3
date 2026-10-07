@@ -16,7 +16,9 @@
 //! Plain loops fill the arrays instead, and inline in every build.
 
 mod rounds;
+#[cfg(all(target_feature = "avx512f", target_feature = "avx512bw"))]
 pub(crate) mod t253;
+#[cfg(all(target_feature = "avx512f", target_feature = "avx512bw"))]
 pub(crate) mod t8;
 
 use core::arch::x86_64::*;
