@@ -7,7 +7,7 @@ Each hash's standard Merkle leaf against its T8 leaf, on the same compression ke
 From the repository root, on the `t8-leaves` branch:
 
 ```sh
-# Everything below, then this report, in about 8 minutes.
+# Run all benchmark suites, then generate this report.
 scripts/t8/run.sh
 ```
 
@@ -26,8 +26,8 @@ RAYON_NUM_THREADS=32 cargo bench -p p3-merkle-tree --features parallel --profile
 - A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.
 - `taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.
 - `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.
-- Criterion prints `time: [low median high]`, the 95% interval of the median.
-- It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.
+- Criterion prints `time: [low estimate high]`; this report reads the median and its 95% interval from the saved estimates.
+- The script keeps each estimate in `target/bench-native/criterion/<group>/<scheme>/<size>/native/estimates.json`.
 - The script saves them as the baseline `native`, copies them to `scripts/t8/results/x86-avx512/`, and builds this report from them.
 
 ## Reading the tables
@@ -42,8 +42,8 @@ RAYON_NUM_THREADS=32 cargo bench -p p3-merkle-tree --features parallel --profile
 **native build**
 
 ```
-date: 2026-09-29T18:30:07+02:00
-commit: dd692539c5b656b2611e7ebdae13d9cf7732ebb8
+date: 2026-10-07T12:08:14+02:00
+commit: c4e1531e43625626997f920a7e0ee389dfa4a047
 cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 kernel: 7.0.0-34-generic
 rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
@@ -94,18 +94,18 @@ Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profi
 
 | Hash | Record | Records | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| BLAKE3 | 256 B | 2^16 | 1.21 ms ±0.0% | 917 µs ±0.0% | 13.86 | 18.30 | **1.320x** | 1.333x |
-| BLAKE3 | 480 B | 2^15 | 1.16 ms ±0.0% | 844 µs ±0.0% | 13.57 | 18.63 | **1.373x** | 1.333x |
-| BLAKE3 | 65,664 B | 2^8 | 1.05 ms ±0.1% | 924 µs ±0.0% | 16.02 | 18.20 | **1.136x** | 1.240x |
-| BLAKE2s | 256 B | 2^16 | 2.03 ms ±0.0% | 1.41 ms ±0.0% | 8.27 | 11.88 | **1.436x** | 1.333x |
-| BLAKE2s | 480 B | 2^15 | 1.84 ms ±0.0% | 1.39 ms ±0.0% | 8.53 | 11.28 | **1.322x** | 1.333x |
-| BLAKE2s | 65,664 B | 2^8 | 1.57 ms ±0.0% | 1.48 ms ±0.0% | 10.74 | 11.39 | **1.061x** | 1.167x |
-| SHA-256 | 256 B | 2^16 | 2.19 ms ±0.0% | 1.66 ms ±0.1% | 7.68 | 10.12 | **1.318x** | 1.667x |
-| SHA-256 | 480 B | 2^15 | 1.92 ms ±0.0% | 1.62 ms ±0.0% | 8.20 | 9.71 | **1.183x** | 1.333x |
-| SHA-256 | 65,664 B | 2^8 | 1.91 ms ±0.0% | 1.73 ms ±0.0% | 8.82 | 9.74 | **1.104x** | 1.168x |
-| SHA-256, T253 | 253 B | 2^16 | 2.23 ms ±0.0% | 1.68 ms ±0.0% | 7.45 | 9.85 | **1.322x** | 1.667x |
-| SHA-256, T253 | 474 B | 2^15 | 1.91 ms ±0.2% | 1.64 ms ±0.0% | 8.13 | 9.49 | **1.168x** | 1.333x |
-| SHA-256, T253 | 65,448 B | 2^8 | 1.89 ms ±0.0% | 1.79 ms ±0.0% | 8.85 | 9.37 | **1.058x** | 1.152x |
+| BLAKE3 | 256 B | 2^16 | 1.2 ms ±0.1% | 928 µs ±0.4% | 13.97 | 18.09 | **1.294x** | 1.333x |
+| BLAKE3 | 480 B | 2^15 | 1.15 ms ±0.0% | 841 µs ±0.1% | 13.71 | 18.69 | **1.364x** | 1.333x |
+| BLAKE3 | 65,664 B | 2^8 | 1.03 ms ±0.1% | 952 µs ±0.1% | 16.25 | 17.66 | **1.087x** | 1.240x |
+| BLAKE2s | 256 B | 2^16 | 2.03 ms ±0.0% | 1.47 ms ±0.0% | 8.27 | 11.39 | **1.377x** | 1.333x |
+| BLAKE2s | 480 B | 2^15 | 1.83 ms ±0.0% | 1.39 ms ±0.0% | 8.60 | 11.33 | **1.317x** | 1.333x |
+| BLAKE2s | 65,664 B | 2^8 | 1.61 ms ±0.0% | 1.5 ms ±0.0% | 10.41 | 11.24 | **1.080x** | 1.167x |
+| SHA-256 | 256 B | 2^16 | 2.11 ms ±0.1% | 1.66 ms ±0.0% | 7.95 | 10.10 | **1.270x** | 1.667x |
+| SHA-256 | 480 B | 2^15 | 1.89 ms ±0.0% | 1.6 ms ±0.0% | 8.33 | 9.80 | **1.176x** | 1.333x |
+| SHA-256 | 65,664 B | 2^8 | 1.8 ms ±0.0% | 1.75 ms ±0.1% | 9.34 | 9.62 | **1.030x** | 1.168x |
+| SHA-256, T253 | 253 B | 2^16 | 2.28 ms ±0.1% | 1.67 ms ±0.0% | 7.28 | 9.92 | **1.362x** | 1.667x |
+| SHA-256, T253 | 474 B | 2^15 | 1.91 ms ±0.0% | 1.63 ms ±0.0% | 8.12 | 9.53 | **1.174x** | 1.333x |
+| SHA-256, T253 | 65,448 B | 2^8 | 1.79 ms ±0.0% | 1.78 ms ±0.0% | 9.34 | 9.39 | **1.005x** | 1.152x |
 
 ### Leaf hashing, one record, one core
 
@@ -117,18 +117,18 @@ Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profi
 
 | Hash | Record | Standard | T8 | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|
-| BLAKE3 | 256 B | 263 ns ±0.0% | 111 ns ±0.0% | **2.361x** | 1.333x |
-| BLAKE3 | 480 B | 515 ns ±0.0% | 244 ns ±0.0% | **2.108x** | 1.333x |
-| BLAKE3 | 65,664 B | 5.29 µs ±0.0% | 38.9 µs ±0.0% | **0.136x** | 1.240x |
-| BLAKE2s | 256 B | 385 ns ±0.0% | 283 ns ±0.0% | **1.359x** | 1.333x |
-| BLAKE2s | 480 B | 776 ns ±0.1% | 587 ns ±0.0% | **1.322x** | 1.333x |
-| BLAKE2s | 65,664 B | 100 µs ±0.0% | 89 µs ±0.0% | **1.125x** | 1.167x |
-| SHA-256 | 256 B | 131 ns ±0.1% | 69.4 ns ±0.0% | **1.881x** | 1.667x |
-| SHA-256 | 480 B | 203 ns ±0.1% | 138 ns ±0.0% | **1.469x** | 1.333x |
-| SHA-256 | 65,664 B | 24.2 µs ±0.0% | 20.1 µs ±0.0% | **1.202x** | 1.168x |
-| SHA-256, T253 | 253 B | 142 ns ±0.0% | 72.8 ns ±0.1% | **1.943x** | 1.667x |
-| SHA-256, T253 | 474 B | 203 ns ±0.1% | 158 ns ±0.2% | **1.286x** | 1.333x |
-| SHA-256, T253 | 65,448 B | 24.1 µs ±0.0% | 25.3 µs ±0.3% | **0.954x** | 1.152x |
+| BLAKE3 | 256 B | 262 ns ±0.0% | 111 ns ±0.0% | **2.359x** | 1.333x |
+| BLAKE3 | 480 B | 514 ns ±0.0% | 244 ns ±0.0% | **2.108x** | 1.333x |
+| BLAKE3 | 65,664 B | 5.24 µs ±0.0% | 38.8 µs ±0.0% | **0.135x** | 1.240x |
+| BLAKE2s | 256 B | 384 ns ±0.0% | 283 ns ±0.0% | **1.359x** | 1.333x |
+| BLAKE2s | 480 B | 774 ns ±0.1% | 586 ns ±0.0% | **1.321x** | 1.333x |
+| BLAKE2s | 65,664 B | 100 µs ±0.0% | 88.9 µs ±0.0% | **1.125x** | 1.167x |
+| SHA-256 | 256 B | 130 ns ±0.2% | 68.8 ns ±0.0% | **1.894x** | 1.667x |
+| SHA-256 | 480 B | 203 ns ±0.0% | 137 ns ±0.0% | **1.479x** | 1.333x |
+| SHA-256 | 65,664 B | 24.2 µs ±0.0% | 20 µs ±0.0% | **1.208x** | 1.168x |
+| SHA-256, T253 | 253 B | 142 ns ±0.1% | 72.2 ns ±0.1% | **1.961x** | 1.667x |
+| SHA-256, T253 | 474 B | 203 ns ±0.0% | 157 ns ±0.2% | **1.293x** | 1.333x |
+| SHA-256, T253 | 65,448 B | 24.1 µs ±0.0% | 25.2 µs ±0.2% | **0.957x** | 1.152x |
 
 ### Commitment: one full tree
 
@@ -145,30 +145,30 @@ Commands:
 
 | Hash | Record | Records | Threads | Standard | T8 | Standard GB/s | T8 GB/s | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| BLAKE3 | 256 B | 2^16 | 1 | 1.9 ms ±2.2% | 1.63 ms ±1.4% | 8.82 | 10.27 | **1.164x** | 1.250x |
-| BLAKE3 | 256 B | 2^20 | 1 | 41.9 ms ±4.3% | 38.7 ms ±6.5% | 6.41 | 6.94 | **1.082x** | 1.250x |
-| BLAKE3 | 256 B | 2^16 | 32 | 516 µs ±0.9% | 517 µs ±0.3% | 32.51 | 32.48 | **0.999x** | 1.250x |
-| BLAKE3 | 256 B | 2^20 | 32 | 11.7 ms ±1.1% | 11.5 ms ±2.2% | 22.89 | 23.36 | **1.020x** | 1.250x |
-| BLAKE3 | 65,664 B | 2^10 | 1 | 4.6 ms ±1.3% | 4.19 ms ±4.5% | 14.63 | 16.04 | **1.096x** | 1.240x |
-| BLAKE3 | 65,664 B | 2^10 | 32 | 624 µs ±1.4% | 585 µs ±1.2% | 107.80 | 114.91 | **1.066x** | 1.240x |
-| BLAKE2s | 256 B | 2^16 | 1 | 2.53 ms ±0.1% | 1.97 ms ±0.0% | 6.64 | 8.51 | **1.281x** | 1.250x |
-| BLAKE2s | 256 B | 2^20 | 1 | 60.8 ms ±0.1% | 52.8 ms ±0.6% | 4.41 | 5.09 | **1.152x** | 1.250x |
-| BLAKE2s | 256 B | 2^16 | 32 | 541 µs ±0.5% | 543 µs ±4.3% | 30.99 | 30.92 | **0.998x** | 1.250x |
-| BLAKE2s | 256 B | 2^20 | 32 | 11.5 ms ±0.6% | 11.9 ms ±0.9% | 23.31 | 22.60 | **0.969x** | 1.250x |
-| BLAKE2s | 65,664 B | 2^10 | 1 | 6.67 ms ±0.1% | 6.61 ms ±12.8% | 10.08 | 10.18 | **1.009x** | 1.167x |
-| BLAKE2s | 65,664 B | 2^10 | 32 | 769 µs ±0.4% | 727 µs ±1.9% | 87.49 | 92.44 | **1.057x** | 1.167x |
-| SHA-256 | 256 B | 2^16 | 1 | 2.74 ms ±1.6% | 2.16 ms ±3.2% | 6.13 | 7.76 | **1.266x** | 1.500x |
-| SHA-256 | 256 B | 2^20 | 1 | 62.1 ms ±0.4% | 54.7 ms ±0.0% | 4.32 | 4.91 | **1.136x** | 1.500x |
-| SHA-256 | 256 B | 2^16 | 32 | 538 µs ±0.2% | 535 µs ±0.4% | 31.21 | 31.35 | **1.004x** | 1.500x |
-| SHA-256 | 256 B | 2^20 | 32 | 11.8 ms ±1.2% | 11.8 ms ±0.9% | 22.77 | 22.74 | **0.999x** | 1.500x |
-| SHA-256 | 65,664 B | 2^10 | 1 | 8.27 ms ±5.1% | 7.52 ms ±5.8% | 8.13 | 8.94 | **1.100x** | 1.168x |
-| SHA-256 | 65,664 B | 2^10 | 32 | 803 µs ±0.8% | 754 µs ±1.0% | 83.74 | 89.20 | **1.065x** | 1.168x |
-| SHA-256, T253 | 253 B | 2^16 | 1 | 2.76 ms ±0.4% | 2.21 ms ±0.1% | 6.01 | 7.50 | **1.248x** | 1.500x |
-| SHA-256, T253 | 253 B | 2^20 | 1 | 63 ms ±0.8% | 62.8 ms ±8.4% | 4.21 | 4.22 | **1.004x** | 1.500x |
-| SHA-256, T253 | 253 B | 2^16 | 32 | 536 µs ±0.4% | 534 µs ±0.2% | 30.94 | 31.03 | **1.003x** | 1.500x |
-| SHA-256, T253 | 253 B | 2^20 | 32 | 12 ms ±2.0% | 12 ms ±0.7% | 22.11 | 22.15 | **1.002x** | 1.500x |
-| SHA-256, T253 | 65,448 B | 2^10 | 1 | 7.81 ms ±0.3% | 7.4 ms ±0.5% | 8.58 | 9.05 | **1.054x** | 1.152x |
-| SHA-256, T253 | 65,448 B | 2^10 | 32 | 783 µs ±0.8% | 768 µs ±0.3% | 85.58 | 87.31 | **1.020x** | 1.152x |
+| BLAKE3 | 256 B | 2^16 | 1 | 1.8 ms ±0.0% | 1.58 ms ±0.1% | 9.32 | 10.60 | **1.137x** | 1.250x |
+| BLAKE3 | 256 B | 2^20 | 1 | 43.3 ms ±0.1% | 39.1 ms ±3.3% | 6.20 | 6.87 | **1.107x** | 1.250x |
+| BLAKE3 | 256 B | 2^16 | 32 | 521 µs ±0.6% | 519 µs ±0.9% | 32.22 | 32.33 | **1.003x** | 1.250x |
+| BLAKE3 | 256 B | 2^20 | 32 | 11.6 ms ±0.6% | 11.6 ms ±1.6% | 23.20 | 23.20 | **1.000x** | 1.250x |
+| BLAKE3 | 65,664 B | 2^10 | 1 | 4.36 ms ±0.5% | 3.78 ms ±1.6% | 15.44 | 17.78 | **1.152x** | 1.240x |
+| BLAKE3 | 65,664 B | 2^10 | 32 | 633 µs ±0.6% | 595 µs ±0.9% | 106.25 | 112.93 | **1.063x** | 1.240x |
+| BLAKE2s | 256 B | 2^16 | 1 | 2.52 ms ±0.0% | 1.98 ms ±0.0% | 6.65 | 8.47 | **1.274x** | 1.250x |
+| BLAKE2s | 256 B | 2^20 | 1 | 59.4 ms ±0.1% | 51 ms ±0.2% | 4.52 | 5.27 | **1.166x** | 1.250x |
+| BLAKE2s | 256 B | 2^16 | 32 | 535 µs ±0.5% | 538 µs ±3.7% | 31.34 | 31.20 | **0.995x** | 1.250x |
+| BLAKE2s | 256 B | 2^20 | 32 | 11.4 ms ±1.8% | 11.9 ms ±0.9% | 23.46 | 22.49 | **0.959x** | 1.250x |
+| BLAKE2s | 65,664 B | 2^10 | 1 | 6.55 ms ±0.0% | 6.09 ms ±0.0% | 10.26 | 11.03 | **1.075x** | 1.167x |
+| BLAKE2s | 65,664 B | 2^10 | 32 | 786 µs ±1.4% | 728 µs ±1.8% | 85.51 | 92.37 | **1.080x** | 1.167x |
+| SHA-256 | 256 B | 2^16 | 1 | 2.57 ms ±0.1% | 2.12 ms ±0.0% | 6.52 | 7.91 | **1.213x** | 1.500x |
+| SHA-256 | 256 B | 2^20 | 1 | 60.7 ms ±0.2% | 53.6 ms ±0.2% | 4.42 | 5.01 | **1.132x** | 1.500x |
+| SHA-256 | 256 B | 2^16 | 32 | 542 µs ±1.8% | 542 µs ±0.5% | 30.93 | 30.93 | **1.000x** | 1.500x |
+| SHA-256 | 256 B | 2^20 | 32 | 12 ms ±1.1% | 12.1 ms ±3.0% | 22.36 | 22.21 | **0.993x** | 1.500x |
+| SHA-256 | 65,664 B | 2^10 | 1 | 7.32 ms ±0.0% | 7.13 ms ±0.1% | 9.18 | 9.43 | **1.027x** | 1.168x |
+| SHA-256 | 65,664 B | 2^10 | 32 | 789 µs ±1.1% | 761 µs ±1.7% | 85.25 | 88.33 | **1.036x** | 1.168x |
+| SHA-256, T253 | 253 B | 2^16 | 1 | 2.76 ms ±0.1% | 2.16 ms ±0.2% | 6.01 | 7.69 | **1.280x** | 1.500x |
+| SHA-256, T253 | 253 B | 2^20 | 1 | 62.9 ms ±0.2% | 56.8 ms ±0.0% | 4.22 | 4.67 | **1.106x** | 1.500x |
+| SHA-256, T253 | 253 B | 2^16 | 32 | 543 µs ±0.7% | 540 µs ±0.6% | 30.55 | 30.68 | **1.004x** | 1.500x |
+| SHA-256, T253 | 253 B | 2^20 | 32 | 12.1 ms ±1.9% | 12.1 ms ±2.0% | 21.93 | 21.95 | **1.001x** | 1.500x |
+| SHA-256, T253 | 65,448 B | 2^10 | 1 | 7.33 ms ±0.1% | 7.31 ms ±0.0% | 9.14 | 9.17 | **1.004x** | 1.152x |
+| SHA-256, T253 | 65,448 B | 2^10 | 32 | 758 µs ±1.5% | 775 µs ±0.7% | 88.42 | 86.47 | **0.978x** | 1.152x |
 
 ### Verification: one opening, one core
 
@@ -182,18 +182,18 @@ Command: `taskset -c 4 cargo bench -p p3-merkle-tree --features parallel --profi
 
 | Hash | Record | Records | Standard per opening | T8 per opening | Speedup | Call ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| BLAKE3 | 256 B | 2^10 | 1.23 µs ±0.4% | 1.1 µs ±0.1% | **1.121x** | 1.077x |
-| BLAKE3 | 256 B | 2^20 | 2.16 µs ±0.4% | 2.03 µs ±0.1% | **1.065x** | 1.043x |
-| BLAKE3 | 65,664 B | 2^10 | 6.45 µs ±0.1% | 39.9 µs ±0.0% | **0.162x** | 1.237x |
-| BLAKE2s | 256 B | 2^10 | 1.74 µs ±0.2% | 1.64 µs ±0.2% | **1.061x** | 1.077x |
-| BLAKE2s | 256 B | 2^20 | 3.04 µs ±0.1% | 2.91 µs ±0.3% | **1.044x** | 1.043x |
-| BLAKE2s | 65,664 B | 2^10 | 102 µs ±0.0% | 90.4 µs ±0.0% | **1.124x** | 1.165x |
-| SHA-256 | 256 B | 2^10 | 575 ns ±0.1% | 523 ns ±0.1% | **1.100x** | 1.154x |
-| SHA-256 | 256 B | 2^20 | 987 ns ±0.1% | 907 ns ±0.2% | **1.088x** | 1.087x |
-| SHA-256 | 65,664 B | 2^10 | 24.7 µs ±0.1% | 20.7 µs ±0.0% | **1.196x** | 1.166x |
-| SHA-256, T253 | 253 B | 2^10 | 588 ns ±0.1% | 525 ns ±0.1% | **1.119x** | 1.154x |
-| SHA-256, T253 | 253 B | 2^20 | 999 ns ±0.1% | 927 ns ±0.3% | **1.078x** | 1.087x |
-| SHA-256, T253 | 65,448 B | 2^10 | 24.6 µs ±0.0% | 25.7 µs ±0.1% | **0.959x** | 1.150x |
+| BLAKE3 | 256 B | 2^10 | 1.15 µs ±0.1% | 1.02 µs ±0.2% | **1.125x** | 1.077x |
+| BLAKE3 | 256 B | 2^20 | 1.98 µs ±0.1% | 1.83 µs ±0.2% | **1.078x** | 1.043x |
+| BLAKE3 | 65,664 B | 2^10 | 6.33 µs ±0.0% | 39.8 µs ±0.0% | **0.159x** | 1.237x |
+| BLAKE2s | 256 B | 2^10 | 1.64 µs ±0.1% | 1.52 µs ±0.0% | **1.082x** | 1.077x |
+| BLAKE2s | 256 B | 2^20 | 2.78 µs ±0.2% | 2.66 µs ±0.0% | **1.047x** | 1.043x |
+| BLAKE2s | 65,664 B | 2^10 | 101 µs ±0.0% | 90.2 µs ±0.0% | **1.123x** | 1.165x |
+| SHA-256 | 256 B | 2^10 | 648 ns ±0.2% | 590 ns ±1.4% | **1.098x** | 1.154x |
+| SHA-256 | 256 B | 2^20 | 1.07 µs ±0.1% | 989 ns ±0.1% | **1.078x** | 1.087x |
+| SHA-256 | 65,664 B | 2^10 | 24.8 µs ±0.0% | 20.6 µs ±0.0% | **1.201x** | 1.166x |
+| SHA-256, T253 | 253 B | 2^10 | 646 ns ±0.2% | 580 ns ±0.2% | **1.114x** | 1.154x |
+| SHA-256, T253 | 253 B | 2^20 | 1.07 µs ±0.4% | 1.01 µs ±0.5% | **1.060x** | 1.087x |
+| SHA-256, T253 | 65,448 B | 2^10 | 24.6 µs ±0.0% | 25.7 µs ±0.1% | **0.960x** | 1.150x |
 
 ## Wider tree nodes
 
@@ -207,24 +207,24 @@ Command: `RAYON_NUM_THREADS=1 taskset -c 4 cargo bench -p p3-merkle-tree --featu
 
 | Hash | Records | Operation | Binary | 4-ary | Speedup | Calls, binary / 4-ary | Proof digests, binary / 4-ary |
 |---|---:|---|---:|---:|---:|---:|---:|
-| Keccak-256 | 2^16 | commit, 1 thread | 6.83 ms | 4.71 ms | **1.451x** | 196,607 / 152,917 | 16 / 24 |
-| Keccak-256 | 2^16 | commit, 32 threads | 603 µs | 511 µs | **1.180x** | 196,607 / 152,917 | 16 / 24 |
-| Keccak-256 | 2^16 | verify | 7.63 µs | 4.33 µs | **1.761x** | 18 / 10 | 16 / 24 |
-| Keccak-256 | 2^20 | commit, 1 thread | 146 ms | 121 ms | **1.208x** | 3,145,727 / 2,446,677 | 20 / 30 |
-| Keccak-256 | 2^20 | commit, 32 threads | 11.5 ms | 9.63 ms | **1.193x** | 3,145,727 / 2,446,677 | 20 / 30 |
-| Keccak-256 | 2^20 | verify | 9.32 µs | 5.18 µs | **1.797x** | 22 / 12 | 20 / 30 |
-| SHA3-256 | 2^16 | commit, 1 thread | 6.18 ms | 4.66 ms | **1.326x** | 196,607 / 152,917 | 16 / 24 |
-| SHA3-256 | 2^16 | commit, 32 threads | 604 µs | 504 µs | **1.199x** | 196,607 / 152,917 | 16 / 24 |
-| SHA3-256 | 2^16 | verify | 7.56 µs | 4.33 µs | **1.747x** | 18 / 10 | 16 / 24 |
-| SHA3-256 | 2^20 | commit, 1 thread | 144 ms | 115 ms | **1.252x** | 3,145,727 / 2,446,677 | 20 / 30 |
-| SHA3-256 | 2^20 | commit, 32 threads | 11.3 ms | 9.51 ms | **1.185x** | 3,145,727 / 2,446,677 | 20 / 30 |
-| SHA3-256 | 2^20 | verify | 9.31 µs | 5.22 µs | **1.784x** | 22 / 12 | 20 / 30 |
-| BLAKE3 | 2^16 | commit, 1 thread | 1.57 ms | 1.47 ms | **1.066x** | 327,679 / 305,834 | 16 / 24 |
-| BLAKE3 | 2^16 | commit, 32 threads | 571 µs | 468 µs | **1.221x** | 327,679 / 305,834 | 16 / 24 |
-| BLAKE3 | 2^16 | verify | 1.85 µs | 1.61 µs | **1.146x** | 20 / 20 | 16 / 24 |
-| BLAKE3 | 2^20 | commit, 1 thread | 42.5 ms | 40.3 ms | **1.056x** | 5,242,879 / 4,893,354 | 20 / 30 |
-| BLAKE3 | 2^20 | commit, 32 threads | 11.7 ms | 9.72 ms | **1.207x** | 5,242,879 / 4,893,354 | 20 / 30 |
-| BLAKE3 | 2^20 | verify | 2.16 µs | 1.95 µs | **1.112x** | 24 / 24 | 20 / 30 |
+| Keccak-256 | 2^16 | commit, 1 thread | 5.44 ms | 3.94 ms | **1.381x** | 196,607 / 152,917 | 16 / 24 |
+| Keccak-256 | 2^16 | commit, 32 threads | 592 µs | 500 µs | **1.184x** | 196,607 / 152,917 | 16 / 24 |
+| Keccak-256 | 2^16 | verify | 7.32 µs | 4.08 µs | **1.795x** | 18 / 10 | 16 / 24 |
+| Keccak-256 | 2^20 | commit, 1 thread | 119 ms | 101 ms | **1.171x** | 3,145,727 / 2,446,677 | 20 / 30 |
+| Keccak-256 | 2^20 | commit, 32 threads | 11.4 ms | 9.73 ms | **1.176x** | 3,145,727 / 2,446,677 | 20 / 30 |
+| Keccak-256 | 2^20 | verify | 8.95 µs | 4.95 µs | **1.809x** | 22 / 12 | 20 / 30 |
+| SHA3-256 | 2^16 | commit, 1 thread | 5.04 ms | 3.95 ms | **1.276x** | 196,607 / 152,917 | 16 / 24 |
+| SHA3-256 | 2^16 | commit, 32 threads | 586 µs | 482 µs | **1.216x** | 196,607 / 152,917 | 16 / 24 |
+| SHA3-256 | 2^16 | verify | 7.31 µs | 4.07 µs | **1.795x** | 18 / 10 | 16 / 24 |
+| SHA3-256 | 2^20 | commit, 1 thread | 119 ms | 102 ms | **1.173x** | 3,145,727 / 2,446,677 | 20 / 30 |
+| SHA3-256 | 2^20 | commit, 32 threads | 12.2 ms | 10.5 ms | **1.165x** | 3,145,727 / 2,446,677 | 20 / 30 |
+| SHA3-256 | 2^20 | verify | 8.91 µs | 4.91 µs | **1.815x** | 22 / 12 | 20 / 30 |
+| BLAKE3 | 2^16 | commit, 1 thread | 2.3 ms | 2.49 ms | **0.924x** | 327,679 / 305,834 | 16 / 24 |
+| BLAKE3 | 2^16 | commit, 32 threads | 555 µs | 494 µs | **1.124x** | 327,679 / 305,834 | 16 / 24 |
+| BLAKE3 | 2^16 | verify | 1.63 µs | 1.5 µs | **1.088x** | 20 / 20 | 16 / 24 |
+| BLAKE3 | 2^20 | commit, 1 thread | 55.8 ms | 57.1 ms | **0.977x** | 5,242,879 / 4,893,354 | 20 / 30 |
+| BLAKE3 | 2^20 | commit, 32 threads | 12.2 ms | 10.1 ms | **1.206x** | 5,242,879 / 4,893,354 | 20 / 30 |
+| BLAKE3 | 2^20 | verify | 1.98 µs | 1.83 µs | **1.083x** | 24 / 24 | 20 / 30 |
 
 ## Notes
 
@@ -235,11 +235,10 @@ Command: `RAYON_NUM_THREADS=1 taskset -c 4 cargo bench -p p3-merkle-tree --featu
 - The tree's node hash starts from the SHA-256 initial value, whose top byte is 0x6a, so no role meets it either.
 - The price is one byte per tagged block: records of 32 + 221 k bytes, compared with plain SHA-256 on the same bytes.
 - Keccak-256 absorbs 136 bytes per permutation, so T8 costs more calls than the plain hash and is not measured.
-- The build targets the host CPU, so all three hashes batch on AVX-512.
-- Both leaves share the transpose of every record into vector lanes, which the call count does not see.
-- Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.
-- So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.
-- On one thread, commitment follows the call ratio.
-- On 32 threads, trees of 256-byte records wait on memory, so fewer calls barely shows.
-- Trees of 64 KiB-class records stay compute-bound on 32 threads, and keep most of the call saving.
-- A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.
+- The build targets the host CPU; full batches of all three hashes use AVX-512.
+- Standard hashes use the current main branch kernels and batch scheduling; T8 and T253 use the adapted research-branch drivers.
+- BLAKE3, BLAKE2s and SHA-256 T8 batches load 64-byte rows and transpose them into vector lanes.
+- T253 uses overlapping rows to load its tagged 31-byte fields.
+- Loads and transposes add work beyond the compression calls counted in the tables.
+- A single long BLAKE3 record can hash independent chunks in parallel; T8 must chain its stages.
+- The host uses the powersave governor with boost enabled; small timing differences should be read alongside the reported intervals.

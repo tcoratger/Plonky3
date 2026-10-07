@@ -20,14 +20,13 @@ PLATFORMS = {
         "threads": 32,
         "pin_note": "`taskset -c 4` pins the process to one core, so single-threaded runs do not migrate.",
         "notes": [
-            "The build targets the host CPU, so all three hashes batch on AVX-512.",
-            "Both leaves share the transpose of every record into vector lanes, which the call count does not see.",
-            "Batched leaves read every record once, 64 bytes at a time, exactly as the standard leaf does.",
-            "So the transpose into vector lanes costs both leaves the same, and dilutes the call saving a little.",
-            "On one thread, commitment follows the call ratio.",
-            "On 32 threads, trees of 256-byte records wait on memory, so fewer calls barely shows.",
-            "Trees of 64 KiB-class records stay compute-bound on 32 threads, and keep most of the call saving.",
-            "A single long BLAKE3 record hashes its chunks in parallel; T8's chained stages cannot, hence the 0.1x rows.",
+            "The build targets the host CPU; full batches of all three hashes use AVX-512.",
+            "Standard hashes use the current main branch kernels and batch scheduling; T8 and T253 use the adapted research-branch drivers.",
+            "BLAKE3, BLAKE2s and SHA-256 T8 batches load 64-byte rows and transpose them into vector lanes.",
+            "T253 uses overlapping rows to load its tagged 31-byte fields.",
+            "Loads and transposes add work beyond the compression calls counted in the tables.",
+            "A single long BLAKE3 record can hash independent chunks in parallel; T8 must chain its stages.",
+            "The host uses the powersave governor with boost enabled; small timing differences should be read alongside the reported intervals.",
         ],
     },
     "mac-neon": {
@@ -332,7 +331,7 @@ def main(results: Path, platform: str) -> None:
     print("## How to reproduce\n")
     print("From the repository root, on the `t8-leaves` branch:\n")
     print("```sh")
-    print("# Everything below, then this report, in about 8 minutes.")
+    print("# Run all benchmark suites, then generate this report.")
     print("scripts/t8/run.sh")
     print("```\n")
     print("Or one table at a time, reading the numbers criterion prints:\n")
@@ -349,8 +348,8 @@ def main(results: Path, platform: str) -> None:
     print("- A trailing regex selects benchmarks, for example `-- 'leaf/sha256'`.")
     print(f"- {PLATFORM['pin_note']}")
     print("- `--profile optimized` is Plonky3's own profile: thin LTO and one codegen unit.")
-    print("- Criterion prints `time: [low median high]`, the 95% interval of the median.")
-    print("- It also keeps each estimate in `target/criterion/<group>/<scheme>/<size>/new/estimates.json`.")
+    print("- Criterion prints `time: [low estimate high]`; this report reads the median and its 95% interval from the saved estimates.")
+    print("- The script keeps each estimate in `target/bench-native/criterion/<group>/<scheme>/<size>/native/estimates.json`.")
     print(f"- The script saves them as the baseline `native`, copies them to `scripts/t8/results/{platform}/`, and builds this report from them.\n")
     print("## Reading the tables\n")
     print("- **Standard, T8**: criterion's median time, with the half-width of its 95% interval.")
