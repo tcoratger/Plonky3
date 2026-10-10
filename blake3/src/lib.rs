@@ -20,9 +20,12 @@ extern crate alloc;
 mod tests;
 
 mod batch;
+pub mod t8;
 
 use blake3::{CHUNK_LEN, OUT_LEN};
 use p3_symmetric::CryptographicHasher;
+
+pub use crate::t8::T8Blake3;
 
 /// Messages the widest compiled backend advances in one batched compression.
 ///

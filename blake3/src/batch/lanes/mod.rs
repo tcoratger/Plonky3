@@ -79,6 +79,25 @@ macro_rules! out_of_line_steps {
             }
         }
 
+        $(#[target_feature(enable = $feature)])?
+        unsafe fn t8_group<const G: usize>(
+            lanes: &$crate::batch::Lanes<'_, $w, G>,
+            stages: usize,
+            out: &mut [[[u8; blake3::OUT_LEN]; $w]; G],
+        ) {
+            $crate::batch::t8::group::<Self, $w, G>(lanes, stages, out)
+        }
+
+        #[inline(never)]
+        $(#[target_feature(enable = $feature)])?
+        unsafe fn t8_compress<const G: usize>(
+            h: &mut $crate::batch::State<Self, G>,
+            m: &$crate::batch::Block<Self, G>,
+            counter: u64,
+        ) {
+            $crate::batch::t8::compress_role::<Self, G>(h, m, counter)
+        }
+
         #[inline(never)]
         $(#[target_feature(enable = $feature)])?
         unsafe fn parent<const G: usize>(
@@ -141,7 +160,7 @@ use core::fmt;
 use blake3::{BLOCK_LEN, OUT_LEN};
 
 use super::compress::{BLOCK_WORDS, STATE_WORDS};
-use super::{Lanes, Mode, State};
+use super::{Block, Lanes, Mode, State};
 
 /// Every backend this build compiles, widest first.
 ///
@@ -206,6 +225,8 @@ pub(crate) struct Kernel {
     /// The spreading driver alone, so tests reach it whatever the cost model picks.
     #[cfg(test)]
     spread: unsafe fn(Mode, &[u8], usize, &mut [[u8; OUT_LEN]]),
+    /// The T8 leaf driver compiled for the backend, under the same condition.
+    run_t8: unsafe fn(&[u8], usize, &mut [[u8; OUT_LEN]]),
 }
 
 impl Kernel {
@@ -219,6 +240,7 @@ impl Kernel {
             run: super::hash_many_with::<V, W, G>,
             #[cfg(test)]
             spread: V::spread::<G>,
+            run_t8: super::t8::hash_many_with::<V, W, G>,
         }
     }
 
@@ -242,6 +264,15 @@ impl Kernel {
     pub(crate) fn spread(self, mode: Mode, input: &[u8], len: usize, out: &mut [[u8; OUT_LEN]]) {
         // SAFETY: kernels only leave this module through `supported`, which checks the CPU.
         unsafe { (self.spread)(mode, input, len, out) }
+    }
+
+    /// T8-hash equal-length records of `len` bytes laid end to end in `input`.
+    ///
+    /// The caller guarantees `input.len() == len * out.len()` and a T8 record length.
+    #[inline]
+    pub(crate) fn hash_many_t8(self, input: &[u8], len: usize, out: &mut [[u8; OUT_LEN]]) {
+        // SAFETY: kernels only leave this module through `supported`, which checks the CPU.
+        unsafe { (self.run_t8)(input, len, out) }
     }
 }
 
@@ -430,6 +461,24 @@ pub(super) trait Backend<const W: usize>: Word {
         right: &State<Self, G>,
         root: u32,
     ) -> State<Self, G>;
+
+    /// The T8 group step, compiled with this backend's target features.
+    ///
+    /// # Safety
+    ///
+    /// The running CPU has this backend's target features.
+    unsafe fn t8_group<const G: usize>(
+        lanes: &Lanes<'_, W, G>,
+        stages: usize,
+        out: &mut [[[u8; OUT_LEN]; W]; G],
+    );
+
+    /// One T8 call on every lane, kept out of line so a stage's three calls share one copy of the kernel.
+    ///
+    /// # Safety
+    ///
+    /// The running CPU has this backend's target features.
+    unsafe fn t8_compress<const G: usize>(h: &mut State<Self, G>, m: &Block<Self, G>, counter: u64);
 }
 
 /// Every lane of one vector, in lane order.
